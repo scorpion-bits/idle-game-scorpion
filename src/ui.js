@@ -86,13 +86,14 @@ export function createScroll(width) {
     if (max > 0) {
       const thumbH = Math.max(30, (s.viewH * s.viewH) / s.contentH);
       const thumbY = (s.scrollY / max) * (s.viewH - thumbH);
-      bar.roundRect(width + 2, thumbY, 4, thumbH, 2).fill({ color: 0x6ad8fe, alpha: 0.5 });
+      bar.roundRect(s.width + 2, thumbY, 4, thumbH, 2).fill({ color: 0x6ad8fe, alpha: 0.5 });
     }
   };
 
-  s.resize = (viewH) => {
+  s.resize = (viewH, w = s.width) => {
     s.viewH = viewH;
-    maskG.clear().rect(-4, -4, width + 16, viewH + 8).fill(0xffffff);
+    s.width = w;
+    maskG.clear().rect(-4, -4, w + 16, viewH + 8).fill(0xffffff);
     s.relayout();
   };
 
@@ -104,7 +105,7 @@ export function createScroll(width) {
 // clicar na aba ativa recolhe a gaveta; clicar em outra troca o conteúdo.
 const easeOut = (t) => 1 - (1 - t) ** 3;
 
-export function createDock({ side, panelW, handleW = 38, handleH = 124 }) {
+export function createDock({ side, panelW, handleW = 38 }) {
   const root = new Container();
   const panel = new Container();
   const panelBg = new Graphics();
@@ -120,6 +121,7 @@ export function createDock({ side, panelW, handleW = 38, handleH = 124 }) {
     root, side, panelW, header,
     open: true, p: 1, fade: 1, active: 0, tabs: [],
     W: 0, H: 0, top: 90, headerH: 0, onChange: null,
+    handleH: 124, handleTop: 24, labelSize: 15,
   };
 
   const PAGE_TOP = 54;
@@ -131,7 +133,6 @@ export function createDock({ side, panelW, handleW = 38, handleH = 124 }) {
     const label = txt(name, '#b4c6d7', 15, true);
     label.anchor.set(0.5);
     label.rotation = side === 'right' ? -Math.PI / 2 : Math.PI / 2;
-    label.position.set(handleW / 2, handleH / 2);
     h.addChild(bg, label);
     h.eventMode = 'static';
     h.cursor = 'pointer';
@@ -152,7 +153,9 @@ export function createDock({ side, panelW, handleW = 38, handleH = 124 }) {
   dock.paint = () => {
     dock.tabs.forEach((t, i) => {
       const on = dock.open && i === dock.active;
-      drawSlab(t.bg, handleW, handleH, {
+      t.label.position.set(handleW / 2, dock.handleH / 2);
+      t.label.style.fontSize = dock.labelSize;
+      drawSlab(t.bg, handleW, dock.handleH, {
         face: on ? 0x1f2c52 : 0x111a33,
         edge: on ? t.accent : 0x3a4a63,
         depth: 4,
@@ -190,6 +193,15 @@ export function createDock({ side, panelW, handleW = 38, handleH = 124 }) {
 
   dock.state = () => ({ open: dock.open, active: dock.active });
 
+  // tamanho e posição das abas (muda em telas pequenas)
+  dock.configure = ({ handleH, handleTop, labelSize }) => {
+    dock.handleH = handleH;
+    dock.handleTop = handleTop;
+    dock.labelSize = labelSize;
+    dock.paint();
+    dock.position();
+  };
+
   dock.activePage = () => dock.tabs[dock.active]?.page;
 
   dock.setHeader = (container, h) => {
@@ -198,11 +210,12 @@ export function createDock({ side, panelW, handleW = 38, handleH = 124 }) {
     dock.headerH = h;
   };
 
-  dock.layout = (W, H, top) => {
+  // bottom: até onde a gaveta pode descer (em celular, para antes dos botões de baixo)
+  dock.layout = (W, H, top, bottom = H - 14) => {
     dock.W = W;
     dock.H = H;
     dock.top = top;
-    const panelH = H - top - 14;
+    const panelH = Math.max(160, bottom - top);
     drawSlab(panelBg, panelW, panelH, { face: 0x0e1630, edge: 0x2c4a66, depth: 6, cut: 20 });
     const pageTop = PAGE_TOP + dock.headerH;
     for (const t of dock.tabs) t.page.resize(panelH - pageTop - 14);
@@ -219,8 +232,8 @@ export function createDock({ side, panelW, handleW = 38, handleH = 124 }) {
     panel.position.set(x, dock.top);
     panel.visible = dock.p > 0.001;
     handles.x = side === 'right' ? x - handleW + 4 : x + panelW - 4;
-    handles.y = dock.top + 24;
-    dock.tabs.forEach((t, i) => { t.h.y = i * (handleH + 12); });
+    handles.y = dock.top + dock.handleTop;
+    dock.tabs.forEach((t, i) => { t.h.y = i * (dock.handleH + 12); });
   };
 
   dock.update = (dt) => {

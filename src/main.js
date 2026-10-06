@@ -8,7 +8,14 @@ import {
 } from './ui.js';
 
 const app = new Application();
-await app.init({ background: '#0b1020', resizeTo: window, antialias: true });
+await app.init({
+  background: '#0b1020',
+  resizeTo: window,
+  antialias: true,
+  resolution: Math.min(window.devicePixelRatio || 1, 2.5),
+  autoDensity: true,
+});
+app.canvas.style.touchAction = 'none';
 document.body.appendChild(app.canvas);
 
 // ---------- Constantes ----------
@@ -42,6 +49,8 @@ let frenzyLeft = 0;
 let buyMode = 1;
 let resetting = false;
 let savedUi = null;
+let uiMoved = false;                // true quando o último gesto foi um arrasto (não um toque)
+const touchUi = window.matchMedia('(pointer: coarse)').matches;
 
 const unlocked = new Set();     // ids de conquistas
 const bought = new Set();       // ids de melhorias
@@ -56,9 +65,9 @@ const byId = (id) => upgrades.find((u) => u.id === id);
 
 // Impulsos: habilidades ativas com recarga (como em Clicker Heroes / Tap Titans)
 const abilityDefs = [
-  { id: 'rage',      name: 'Fúria',     desc: 'Cliques x10 por 15s',   dur: 15000, cd: 120000 },
-  { id: 'overclock', name: 'Overclock', desc: 'Produção x3 por 20s',   dur: 20000, cd: 180000 },
-  { id: 'sprint',    name: 'Sprint',    desc: '+10 min de produção',   dur: 0,     cd: 300000 },
+  { id: 'rage',      name: 'Fúria',     desc: 'Cliques x10 · 15s',   dur: 15000, cd: 120000 },
+  { id: 'overclock', name: 'Overclock', desc: 'Produção x3 · 20s',   dur: 20000, cd: 180000 },
+  { id: 'sprint',    name: 'Sprint',    desc: '+10 min de bits',   dur: 0,     cd: 300000 },
 ];
 const abilities = Object.fromEntries(abilityDefs.map((a) => [a.id, { act: 0, cd: 0 }]));
 
@@ -297,6 +306,8 @@ const deco = new Graphics();
 app.stage.addChild(deco);
 
 let decoFrenzy = false;
+let cubeSize = 300;
+let cubeBaseY = 0;
 
 function drawDeco() {
   const { width: W, height: H } = app.screen;
@@ -310,10 +321,10 @@ function drawDeco() {
 
   // plataforma sob o cubo
   const cx = W / 2;
-  const cy = H / 2 + 138;
-  const rx = 215;
+  const cy = cubeBaseY + cubeSize * 0.46;
+  const rx = cubeSize * 0.72;
   const ry = rx / 2;
-  const t = 16;
+  const t = Math.max(8, cubeSize * 0.055);
   const edge = decoFrenzy ? 0xffc46b : 0x6ad8fe;
 
   deco.ellipse(cx, cy + t + 14, rx + 40, ry + 24).fill({ color: edge, alpha: decoFrenzy ? 0.14 : 0.06 });
@@ -330,7 +341,7 @@ const texture = await Assets.load(`${import.meta.env.BASE_URL}assets/cube.png`);
 const cube = new Sprite(texture);
 cube.anchor.set(0.5);
 
-const baseScale = 300 / texture.height;
+let baseScale = cubeSize / texture.height;
 cube.scale.set(baseScale);
 cube.eventMode = 'static';
 cube.cursor = 'pointer';
@@ -369,7 +380,7 @@ resetBtn.on('pointerdown', () => {
 app.stage.addChild(resetBtn);
 
 // ---------- Gavetas laterais ----------
-const PANEL_W = 318;
+const PANEL_W = 300;
 const PAGE_W = PANEL_W - 28;
 const CARD_W = PAGE_W - 14;
 const DEPTH = 4;
@@ -417,11 +428,11 @@ for (const u of upgrades) {
   const accent = u.kind === 'click' ? 0x6ad8fe : 0x7ee2a8;
   const btn = makeSlabButton(CARD_W, H, 0x182244, accent, { depth: DEPTH, cut: 9, edgeAlpha: 0.8 });
 
-  const title = txt('', '#eef5fb', 17, true);
-  title.position.set(14, 7);
-  const lvlText = txt('', '#7ee2a8', 13, true);
+  const title = txt('', '#eef5fb', 15, true);
+  title.position.set(14, 8);
+  const lvlText = txt('', '#7ee2a8', 12, true);
   lvlText.anchor.set(1, 0);
-  lvlText.position.set(CARD_W - 16, 10);
+  lvlText.position.set(CARD_W - 14, 10);
   const cost = txt('', '#eef5fb', 14);
   cost.position.set(14, 30);
   const info = txt('', '#9fb3c8', 13);
@@ -429,7 +440,7 @@ for (const u of upgrades) {
   const bar = new Graphics();
 
   btn.addChild(title, lvlText, cost, info, bar);
-  btn.on('pointertap', () => buy(u));
+  btn.on('pointertap', () => { if (!uiMoved) buy(u); });
 
   (u.kind === 'click' ? clickPage : prodPage).add(btn, H + DEPTH);
   shopButtons.push({ u, btn, title, lvlText, cost, info, bar });
@@ -444,8 +455,8 @@ function updateShop() {
     const per = (u.click ?? u.bps) * unitMult(u) * (u.click ? mods.clickMult : 1);
     const perText = u.click ? `+${rate(per)}/clique` : `+${rate(per)}/s`;
 
-    title.text = `${u.name} (${u.owned})`;
-    lvlText.text = `Nv ${levelOf(u)}`;
+    title.text = u.name;
+    lvlText.text = `x${u.owned} · Nv ${levelOf(u)}`;
     cost.text = `Comprar +${plan.n}: ${format(plan.cost)}`;
     info.text = `${perText} cada · nível: ${u.owned % LEVEL_SIZE}/${LEVEL_SIZE}`;
     btn.alpha = plan.ok ? 1 : 0.55;
@@ -466,13 +477,13 @@ const perkButtons = [];
 for (const imp of improvements) {
   const H = 58;
   const btn = makeSlabButton(CARD_W, H, 0x1b1f45, 0x8b5cf6, { depth: DEPTH, cut: 9, edgeAlpha: 0.8 });
-  const title = txt(imp.name, '#eef5fb', 16, true);
+  const title = txt(imp.name, '#eef5fb', 15, true);
   title.position.set(14, 8);
-  const info = txt(`${imp.desc} · Custo: ${format(imp.cost)}`, '#9fb3c8', 13);
+  const info = txt(`Dobra a produção · Custo: ${format(imp.cost)}`, '#9fb3c8', 13);
   info.position.set(14, 33);
   btn.addChild(title, info);
   btn.visible = false;
-  btn.on('pointertap', () => buyImprovement(imp));
+  btn.on('pointertap', () => { if (!uiMoved) buyImprovement(imp); });
   perksPage.add(btn, H + DEPTH);
   perkButtons.push({ imp, btn });
 }
@@ -533,7 +544,7 @@ const abilityButtons = abilityDefs.map((a) => {
   btn.addChild(name, status);
   btn.on('pointertap', () => useAbility(a));
   app.stage.addChild(btn);
-  return { a, btn, status };
+  return { a, btn, name, status };
 });
 
 function useAbility(a) {
@@ -617,35 +628,66 @@ function prestige() {
 }
 prestigeBtn.on('pointertap', prestige);
 
-// ---------- Painel de conquistas ----------
-const ACH_COLS = 2;
-const ACH_ROWS = Math.ceil(achievements.length / ACH_COLS);
-const ACH_COL_W = 400;
-const ACH_ROW_H = 28;
-const ACH_W = ACH_COLS * ACH_COL_W + 40;
-const ACH_H = 70 + ACH_ROWS * ACH_ROW_H;
-
+// ---------- Painel de conquistas (rolável; 2 colunas em telas largas) ----------
 const achPanel = new Container();
 achPanel.visible = false;
 achPanel.eventMode = 'static';
-achPanel.cursor = 'pointer';
 const achBg = new Graphics();
-drawSlab(achBg, ACH_W, ACH_H, { face: 0x0f1730, edge: 0xffc46b, depth: 6, cut: 20 });
 achPanel.addChild(achBg);
-const achTitle = txt('', '#ffc46b', 22, true);
-achTitle.position.set(24, 16);
+const achTitle = txt('', '#ffc46b', 20, true);
 achPanel.addChild(achTitle);
+const achScroll = createScroll(800);
+achPanel.addChild(achScroll.root);
 
-const achRows = achievements.map((a, i) => {
+const achRows = achievements.map((a) => {
   const row = txt('', '#7d94aa', 14);
-  row.position.set(24 + Math.floor(i / ACH_ROWS) * ACH_COL_W, 58 + (i % ACH_ROWS) * ACH_ROW_H);
-  achPanel.addChild(row);
+  achScroll.content.addChild(row);
   return { a, row };
 });
 
+const achClose = makeSlabButton(84, 30, 0x2a2410, 0xffc46b, { depth: 3, cut: 7 });
+const achCloseLabel = txt('Fechar', '#ffc46b', 14, true);
+achCloseLabel.anchor.set(0.5);
+achCloseLabel.position.set(42, 15);
+achClose.addChild(achCloseLabel);
+achPanel.addChild(achClose);
+
+let achW = 860;
+
+function layoutAch() {
+  const { width, height } = app.screen;
+  const narrow = width < 760;
+  const w = Math.min(860, width - (narrow ? 12 : 24));
+  const cols = w >= 700 ? 2 : 1;
+  const colW = (w - 48) / cols;
+  const rowH = narrow ? 26 : 28;
+  const perCol = Math.ceil(achievements.length / cols);
+  const contentH = perCol * rowH + 8;
+  const viewH = Math.min(contentH, height - (narrow ? 12 : 24) - 84);
+  const h = 70 + viewH + 14;
+  achW = w;
+
+  drawSlab(achBg, w, h, { face: 0x0f1730, edge: 0xffc46b, depth: 6, cut: 20 });
+  achTitle.position.set(22, narrow ? 12 : 16);
+  achTitle.style.fontSize = narrow ? 16 : 20;
+  achClose.position.set(w - 84 - 18, 14);
+
+  achRows.forEach(({ row }, i) => {
+    row.style.fontSize = narrow ? 12 : 14;
+    row.style.wordWrap = true;
+    row.style.wordWrapWidth = colW - 8;
+    row.position.set(Math.floor(i / perCol) * colW, (i % perCol) * rowH);
+  });
+  achScroll.root.position.set(24, 58);
+  achScroll.resize(viewH, w - 48);
+  achScroll.contentH = contentH;   // as linhas ficam direto no conteúdo (sem itens empilhados)
+  achScroll.scrollBy(0);
+  achPanel.position.set((width - w) / 2, Math.max(6, (height - h) / 2));
+}
+
 function refreshAchievements() {
   achLabel.text = `Conquistas ${unlocked.size}/${achievements.length}`;
-  achTitle.text = `Conquistas (+${Math.round(unlocked.size * ACHIEVEMENT_BONUS * 100)}% de produção) · toque para fechar`;
+  achTitle.text = `Conquistas (+${Math.round(unlocked.size * ACHIEVEMENT_BONUS * 100)}% de produção)`;
   for (const { a, row } of achRows) {
     const done = unlocked.has(a.id);
     row.text = `${done ? '[x]' : '[ ]'} ${a.name} — ${a.desc}`;
@@ -655,10 +697,11 @@ function refreshAchievements() {
 
 // ---------- Árvore de habilidades: mandala isométrica ----------
 const NODE_S = 17;                         // tamanho do cubo de cada nó
-const TREE_HEAD = 60;
-const TREE_FOOT = 52;
+let TREE_HEAD = 60;
+let TREE_FOOT = 52;
 const R_MAX = RING_R0 + 9 * RING_STEP;
-const HINT = 'Arraste para mover · roda do mouse: zoom · clique em um nó brilhante para comprar';
+const HINT_WIDE = 'Arraste para mover · roda do mouse: zoom · clique em um nó brilhante para comprar';
+const HINT_TOUCH = 'Arraste · pinça: zoom · toque 2x no nó para comprar';
 
 const tree = new Container();
 tree.visible = false;
@@ -684,18 +727,21 @@ const pointsText = txt('', '#eef5fb', 15, true);
 pointsText.anchor.set(0.5);
 pointsText.position.set(85, 15);
 pointsChip.addChild(pointsText);
+pointsChip.labelObj = pointsText;
 
 const treeRespec = makeSlabButton(138, 30, 0x16203a, 0x3a4a63, { depth: 3, cut: 7 });
 const respecLabel = txt('Redistribuir', '#9fb3c8', 14, true);
 respecLabel.anchor.set(0.5);
 respecLabel.position.set(69, 15);
 treeRespec.addChild(respecLabel);
+treeRespec.labelObj = respecLabel;
 
 const treeClose = makeSlabButton(92, 30, 0x2a2410, 0xffc46b, { depth: 3, cut: 7 });
 const closeLabel = txt('Fechar', '#ffc46b', 14, true);
 closeLabel.anchor.set(0.5);
 closeLabel.position.set(46, 15);
 treeClose.addChild(closeLabel);
+treeClose.labelObj = closeLabel;
 
 function smallButton(w, label, face, edge, color) {
   const b = makeSlabButton(w, 28, face, edge, { depth: 3, cut: 7 });
@@ -703,11 +749,17 @@ function smallButton(w, label, face, edge, color) {
   t.anchor.set(0.5);
   t.position.set(w / 2, 14);
   b.addChild(t);
+  b.labelObj = t;
   return b;
 }
 const zoomOut = smallButton(34, '-', 0x16203a, 0x3a4a63, '#eef5fb');
 const zoomIn = smallButton(34, '+', 0x16203a, 0x3a4a63, '#eef5fb');
 const zoomFit = smallButton(108, 'Centralizar', 0x16203a, 0x3a4a63, '#9fb3c8');
+
+function fitButton(btn, w, h) {
+  btn.paint({ w, h });
+  btn.labelObj.position.set(w / 2, h / 2);
+}
 
 const legend = new Container();
 const legendItems = BRANCHES.map((b, i) => {
@@ -724,7 +776,7 @@ const legendItems = BRANCHES.map((b, i) => {
   return { b, label };
 });
 
-const hintText = txt(HINT, '#55697d', 12);
+const hintText = txt(touchUi ? HINT_TOUCH : HINT_WIDE, '#55697d', 12);
 
 // cartão de informações do nó (perto do cubo sob o mouse)
 const tip = new Container();
@@ -825,6 +877,7 @@ nodeLayer.addChild(coreLabel);
 const nodeViews = new Map();
 let treeDragMoved = false;
 let hoverId = null;
+let selectedId = null;
 
 const sortedSkills = [...SKILLS].sort((a, b) => a.y - b.y);
 for (const s of sortedSkills) {
@@ -843,12 +896,48 @@ for (const s of sortedSkills) {
 
   node.eventMode = 'static';
   node.cursor = 'pointer';
-  node.hitArea = new Rectangle(-NODE_S * 0.9, -NODE_S * 1.45, NODE_S * 1.8, NODE_S * 2.3);
-  node.on('pointertap', () => { if (!treeDragMoved) buySkill(s); });
-  node.on('pointerover', () => { hoverId = s.id; drawNode(s); showTip(s); });
-  node.on('pointerout', () => { hoverId = null; drawNode(s); tip.visible = false; });
+  const grow = touchUi ? 1.3 : 1;
+  node.hitArea = new Rectangle(-NODE_S * 0.9 * grow, -NODE_S * 1.45 * grow, NODE_S * 1.8 * grow, NODE_S * 2.3 * grow);
+  node.on('pointertap', () => {
+    if (treeDragMoved) return;
+    // no toque, o 1º toque mostra o cartão e o 2º compra
+    if (touchUi && selectedId !== s.id) {
+      selectNode(s);
+      return;
+    }
+    buySkill(s);
+  });
+  node.on('pointerover', () => {
+    if (touchUi) return;
+    hoverId = s.id;
+    drawNode(s);
+    showTip(s);
+  });
+  node.on('pointerout', () => {
+    if (touchUi) return;
+    hoverId = null;
+    drawNode(s);
+    tip.visible = false;
+  });
   nodeLayer.addChild(node);
   nodeViews.set(s.id, { node, g, glow, ring, cost });
+}
+
+function clearSelection() {
+  const old = selectedId;
+  selectedId = null;
+  hoverId = null;
+  tip.visible = false;
+  if (old) drawNode(SKILLS.find((x) => x.id === old));
+}
+
+function selectNode(s) {
+  const old = selectedId;
+  selectedId = s.id;
+  hoverId = s.id;
+  if (old) drawNode(SKILLS.find((x) => x.id === old));
+  drawNode(s);
+  showTip(s);
 }
 
 function skillState(s) {
@@ -886,7 +975,7 @@ function drawNode(s) {
 }
 
 function refreshTree() {
-  pointsText.text = `Pontos livres: ${skillPointsFree()}`;
+  pointsText.text = app.screen.width < 760 ? `Pontos: ${skillPointsFree()}` : `Pontos livres: ${skillPointsFree()}`;
 
   linkG.clear();
   for (const s of SKILLS) {
@@ -936,7 +1025,7 @@ function showTip(s) {
     tipStatus.text = `Requer: ${req.name}`;
     tipStatus.style.fill = '#ffc46b';
   } else if (state === 'buyable') {
-    tipStatus.text = `Clique para comprar · ${s.cost} ponto${s.cost > 1 ? 's' : ''}`;
+    tipStatus.text = `${touchUi ? 'Toque de novo para comprar' : 'Clique para comprar'} · ${s.cost} ponto${s.cost > 1 ? 's' : ''}`;
     tipStatus.style.fill = '#6ad8fe';
   } else {
     tipStatus.text = `Faltam ${s.cost - skillPointsFree()} ponto(s) · custa ${s.cost}`;
@@ -960,9 +1049,19 @@ function showTip(s) {
   const sx = world.x + p.x * world.scale.x;
   const sy = world.y + p.y * world.scale.y;
   const { w, h } = treeSize;
-  let x = sx + 34;
-  if (x + W > w - 12) x = sx - 34 - W;
-  const y = Math.min(h - TREE_FOOT - H - 8, Math.max(TREE_HEAD + 8, sy - H / 2));
+  let x;
+  let y;
+  if (w < 700) {
+    // celular: o cartão fica acima (ou abaixo) do nó, sem cobri-lo
+    x = Math.max(8, Math.min(w - W - 8, sx - W / 2));
+    y = sy - H - 46 >= TREE_HEAD + 6 ? sy - H - 46 : sy + 34;
+    y = Math.min(h - TREE_FOOT - H - 6, Math.max(TREE_HEAD + 6, y));
+  } else {
+    x = sx + 34;
+    if (x + W > w - 8) x = sx - 34 - W;
+    x = Math.max(8, Math.min(w - W - 8, x));
+    y = Math.min(h - TREE_FOOT - H - 8, Math.max(TREE_HEAD + 8, sy - H / 2));
+  }
   tip.position.set(x, y);
   tip.visible = true;
 }
@@ -994,8 +1093,13 @@ treeRespec.on('pointertap', () => {
 let treeSize = { w: 900, h: 600 };
 
 function layoutTree() {
-  const w = Math.min(1180, app.screen.width - 24);
-  const h = Math.min(740, app.screen.height - 24);
+  const narrow = app.screen.width < 760;
+  const compact = narrow || app.screen.height < 520;
+  TREE_HEAD = narrow ? 98 : compact ? 52 : 60;
+  TREE_FOOT = narrow ? 92 : 52;
+  const margin = narrow ? 12 : 24;
+  const w = Math.min(1180, app.screen.width - margin);
+  const h = Math.min(narrow ? 2000 : 740, app.screen.height - margin);
   treeSize = { w, h };
   tree.position.set((app.screen.width - w) / 2, (app.screen.height - h) / 2);
   tree.hitArea = new Rectangle(0, 0, w, h);
@@ -1004,11 +1108,66 @@ function layoutTree() {
   treeBg.rect(8, TREE_HEAD, w - 16, h - TREE_HEAD - TREE_FOOT).fill(0x070c1a);
   treeMask.clear().rect(8, TREE_HEAD, w - 16, h - TREE_HEAD - TREE_FOOT).fill(0xffffff);
 
-  treeClose.position.set(w - 92 - 20, 15);
-  treeRespec.position.set(w - 92 - 138 - 32, 15);
-  pointsChip.position.set(w - 92 - 138 - 170 - 44, 15);
+  if (narrow) {
+    // cabeçalho em duas linhas: título + dica, depois pontos / refazer / fechar
+    treeTitle.style.fontSize = 18;
+    treeTitle.position.set(14, 8);
+    hintText.style.fontSize = 11;
+    hintText.style.wordWrap = true;
+    hintText.style.wordWrapWidth = w - 28;
+    hintText.position.set(14, 32);
+    respecLabel.text = 'Refazer';
+    fitButton(treeClose, 74, 32);
+    fitButton(treeRespec, 90, 32);
+    fitButton(pointsChip, 116, 32);
+    treeClose.position.set(w - 12 - 74, 60);
+    treeRespec.position.set(w - 12 - 74 - 8 - 90, 60);
+    pointsChip.position.set(w - 12 - 74 - 8 - 90 - 8 - 116, 60);
+
+    // legenda em 3 colunas x 2 linhas e botões de zoom embaixo
+    const colW = Math.floor((w - 24) / 3);
+    legendItems.forEach(({ label }, i) => {
+      const item = label.parent;
+      item.x = (i % 3) * colW;
+      item.y = Math.floor(i / 3) * 22;
+      label.style.fontSize = 11;
+    });
+    legend.position.set(14, h - TREE_FOOT + 20);
+    fitButton(zoomFit, 84, 30);
+    fitButton(zoomIn, 38, 30);
+    fitButton(zoomOut, 38, 30);
+    zoomFit.labelObj.text = 'Ajustar';
+    const by = h - 40;
+    zoomFit.position.set(w - 12 - 84, by);
+    zoomIn.position.set(w - 12 - 84 - 8 - 38, by);
+    zoomOut.position.set(w - 12 - 84 - 8 - 38 - 6 - 38, by);
+    return;
+  }
+
+  treeTitle.style.fontSize = 21;
+  treeTitle.position.set(22, compact ? 6 : 11);
+  hintText.style.fontSize = 12;
+  hintText.style.wordWrap = false;
+  hintText.position.set(24, compact ? 32 : 38);
+  respecLabel.text = 'Redistribuir';
+  fitButton(treeClose, 92, 30);
+  fitButton(treeRespec, 138, 30);
+  fitButton(pointsChip, 170, 30);
+  treeClose.position.set(w - 92 - 20, compact ? 10 : 15);
+  treeRespec.position.set(w - 92 - 138 - 32, compact ? 10 : 15);
+  pointsChip.position.set(w - 92 - 138 - 170 - 44, compact ? 10 : 15);
+
+  const legendStep = Math.min(128, Math.floor((w - 34 - 214) / 5));
+  legendItems.forEach(({ label }, i) => {
+    label.parent.x = i * legendStep;
+    label.parent.y = 0;
+    label.style.fontSize = legendStep < 120 ? 12 : 13;
+  });
   legend.position.set(34, h - TREE_FOOT / 2 + 4);
-  hintText.position.set(24, 38);
+  fitButton(zoomFit, 108, 28);
+  fitButton(zoomIn, 34, 28);
+  fitButton(zoomOut, 34, 28);
+  zoomFit.labelObj.text = 'Centralizar';
   const by = h - TREE_FOOT + 12;
   zoomFit.position.set(w - 24 - 108, by);
   zoomIn.position.set(w - 24 - 108 - 8 - 34, by);
@@ -1020,7 +1179,9 @@ function resetTreeView() {
   const viewH = h - TREE_HEAD - TREE_FOOT;
   const extentW = (R_MAX + 100) * 2;
   const extentH = (R_MAX + 100) * 2 * ISO;
-  world.scale.set(Math.min((w - 40) / extentW, (viewH - 10) / extentH));
+  const fit = Math.min((w - 40) / extentW, (viewH - 10) / extentH);
+  // em telas estreitas a árvore inteira ficaria minúscula: começa mais perto do núcleo
+  world.scale.set(w < 700 ? Math.max(fit, 0.6) : fit);
   world.position.set(w / 2, TREE_HEAD + viewH / 2);
 }
 
@@ -1038,33 +1199,84 @@ zoomIn.on('pointertap', () => zoomBy(1.25));
 zoomOut.on('pointertap', () => zoomBy(1 / 1.25));
 zoomFit.on('pointertap', () => resetTreeView());
 
-// arrastar para mover
+// arrastar para mover (1 dedo) e pinça para dar zoom (2 dedos)
 let drag = null;
+let pinch = null;
+const pointers = new Map();
+
+const pointerDist = () => {
+  const [a, b] = [...pointers.values()];
+  return Math.hypot(a.x - b.x, a.y - b.y) || 1;
+};
+const pointerMid = () => {
+  const [a, b] = [...pointers.values()];
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+};
+
 tree.on('pointerdown', (e) => {
-  drag = { sx: e.global.x, sy: e.global.y, wx: world.x, wy: world.y };
+  pointers.set(e.pointerId, { x: e.global.x, y: e.global.y });
   treeDragMoved = false;
+  if (pointers.size === 1) {
+    drag = { sx: e.global.x, sy: e.global.y, wx: world.x, wy: world.y };
+  } else if (pointers.size === 2) {
+    drag = null;
+    const mid = pointerMid();
+    const sc = world.scale.x;
+    pinch = {
+      dist: pointerDist(),
+      scale: sc,
+      // ponto do mundo que está sob o centro da pinça
+      px: (mid.x - tree.x - world.x) / sc,
+      py: (mid.y - tree.y - world.y) / sc,
+    };
+  }
 });
 app.stage.eventMode = 'static';
 app.stage.hitArea = app.screen;
 app.stage.on('pointermove', (e) => {
+  if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.global.x, y: e.global.y });
+
+  if (pinch && pointers.size >= 2) {
+    treeDragMoved = true;
+    tip.visible = false;
+    const next = Math.min(2.2, Math.max(0.2, pinch.scale * (pointerDist() / pinch.dist)));
+    const mid = pointerMid();
+    world.scale.set(next);
+    world.position.set(mid.x - tree.x - pinch.px * next, mid.y - tree.y - pinch.py * next);
+    return;
+  }
   if (!drag) return;
   const dx = e.global.x - drag.sx;
   const dy = e.global.y - drag.sy;
-  if (Math.abs(dx) + Math.abs(dy) > 5) {
+  if (Math.abs(dx) + Math.abs(dy) > 6) {
     treeDragMoved = true;
     tip.visible = false;
   }
   world.position.set(drag.wx + dx, drag.wy + dy);
 });
-const endDrag = () => { drag = null; };
+const endDrag = (e) => {
+  pointers.delete(e.pointerId);
+  if (pointers.size < 2) pinch = null;
+  if (pointers.size === 1) {
+    // sobrou um dedo: continua arrastando a partir da posição atual
+    const [rest] = [...pointers.values()];
+    drag = { sx: rest.x, sy: rest.y, wx: world.x, wy: world.y };
+  } else if (pointers.size === 0) {
+    drag = null;
+  }
+};
 app.stage.on('pointerup', endDrag);
 app.stage.on('pointerupoutside', endDrag);
+app.stage.on('pointercancel', endDrag);
 
 treeClose.on('pointertap', () => toggleTree(false));
 
 function toggleTree(open = !tree.visible) {
   tree.visible = open;
-  tip.visible = false;
+  clearSelection();
+  pointers.clear();
+  drag = null;
+  pinch = null;
   if (open) {
     achPanel.visible = false;
     layoutTree();
@@ -1078,20 +1290,37 @@ function toggleAchievements(open = !achPanel.visible) {
   if (open) {
     tree.visible = false;
     tip.visible = false;
+    layoutAch();
   }
 }
 
 achButton.on('pointertap', () => toggleAchievements());
-achPanel.on('pointertap', () => toggleAchievements(false));
+achClose.on('pointertap', () => toggleAchievements(false));
 skillButton.on('pointertap', () => toggleTree());
 
 app.stage.addChild(achPanel, tree);
 
-// ---------- Rolagem e zoom com a roda do mouse ----------
-app.canvas.addEventListener('wheel', (e) => {
+// ---------- Rolagem: roda do mouse (desktop) e arrasto (toque) ----------
+const canvasPoint = (e) => {
   const rect = app.canvas.getBoundingClientRect();
-  const px = e.clientX - rect.left;
-  const py = e.clientY - rect.top;
+  return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+};
+
+// qual área rolável está sob o ponto (gaveta ativa ou painel de conquistas)
+function scrollTargetAt(px, py) {
+  if (tree.visible) return null;
+  if (achPanel.visible) {
+    const inside = px >= achPanel.x && px <= achPanel.x + achW && py >= achPanel.y && py <= achPanel.y + achScroll.viewH + 84;
+    return inside ? achScroll : null;
+  }
+  for (const dock of [leftDock, rightDock]) {
+    if (dock.hit(px, py)) return dock.activePage() ?? null;
+  }
+  return null;
+}
+
+app.canvas.addEventListener('wheel', (e) => {
+  const { x: px, y: py } = canvasPoint(e);
 
   if (tree.visible) {
     e.preventDefault();
@@ -1104,41 +1333,162 @@ app.canvas.addEventListener('wheel', (e) => {
     tip.visible = false;
     return;
   }
-  for (const dock of [leftDock, rightDock]) {
-    if (dock.hit(px, py)) {
-      e.preventDefault();
-      dock.activePage()?.scrollBy(e.deltaY);
-      return;
-    }
+  const target = scrollTargetAt(px, py);
+  if (target) {
+    e.preventDefault();
+    target.scrollBy(e.deltaY);
   }
 }, { passive: false });
 
+// toque: arrastar o dedo rola a lista; um arrasto nunca vira clique em botão
+let touchScroll = null;
+app.canvas.addEventListener('pointerdown', (e) => {
+  uiMoved = false;
+  if (e.pointerType === 'mouse') return;
+  const { x, y } = canvasPoint(e);
+  const target = scrollTargetAt(x, y);
+  touchScroll = target ? { target, y: e.clientY, moved: 0 } : null;
+});
+app.canvas.addEventListener('pointermove', (e) => {
+  if (!touchScroll) return;
+  const dy = touchScroll.y - e.clientY;
+  touchScroll.y = e.clientY;
+  touchScroll.moved += Math.abs(dy);
+  if (touchScroll.moved > 8) uiMoved = true;
+  if (uiMoved) touchScroll.target.scrollBy(dy);
+});
+for (const type of ['pointerup', 'pointercancel']) {
+  app.canvas.addEventListener(type, () => { touchScroll = null; });
+}
+
 // ---------- Layout ----------
-let cubeBaseY = 0;
+
+// 'desktop' | 'portrait' (celular em pé) | 'landscape' (celular deitado, tela baixa)
+let layoutMode = 'desktop';
+let hudBottom = 160;
+let ctrlTop = 0;
+let xpLayout = { y: 126, w: 240 };
+
+function fitAbility({ btn, name, status }, w, h, compact) {
+  btn.paint({ w, h });
+  name.style.fontSize = compact ? 12 : 15;
+  status.style.fontSize = compact ? 11 : 13;
+  name.position.set(10, compact ? 3 : 5);
+  status.position.set(10, compact ? 19 : 25);
+}
+
+function fitBottom({ btn, label }, w, h, fontSize) {
+  btn.paint({ w, h });
+  label.style.fontSize = fontSize;
+  label.position.set(w / 2, h / 2);
+}
 
 function layout() {
   const { width, height } = app.screen;
-  cubeBaseY = height / 2;
-  cube.x = width / 2;
-  counter.position.set(width / 2, 14);
-  bpsText.position.set(width / 2, 72);
-  metaText.position.set(width / 2, 100);
-  frenzyText.position.set(width / 2, 140);
+  const portrait = width < 760;
+  const landscape = !portrait && height < 520;
+  layoutMode = portrait ? 'portrait' : landscape ? 'landscape' : 'desktop';
+  const cx = width / 2;
 
-  leftDock.layout(width, height, 96);
-  rightDock.layout(width, height, 96);
+  // ----- HUD -----
+  if (portrait) {
+    counter.style.fontSize = 38; counter.position.set(cx, 8);
+    bpsText.style.fontSize = 18; bpsText.position.set(cx, 52);
+    metaText.style.fontSize = 12; metaText.position.set(cx, 76);
+    frenzyText.style.fontSize = 15; frenzyText.position.set(cx, 108);
+    xpLayout = { y: 94, w: Math.min(220, width - 40) };
+    hudBottom = 128;
+  } else if (landscape) {
+    counter.style.fontSize = 30; counter.position.set(cx, 4);
+    bpsText.style.fontSize = 16; bpsText.position.set(cx, 38);
+    metaText.style.fontSize = 12; metaText.position.set(cx, 58);
+    frenzyText.style.fontSize = 14; frenzyText.position.set(cx, 86);
+    xpLayout = { y: 76, w: 200 };
+    hudBottom = 104;
+  } else {
+    counter.style.fontSize = 48; counter.position.set(cx, 14);
+    bpsText.style.fontSize = 22; bpsText.position.set(cx, 72);
+    metaText.style.fontSize = 15; metaText.position.set(cx, 100);
+    frenzyText.style.fontSize = 20; frenzyText.position.set(cx, 140);
+    xpLayout = { y: 126, w: 240 };
+    hudBottom = 160;
+  }
 
-  const row1 = height - 118;
-  abilityButtons.forEach(({ btn }, i) => btn.position.set(width / 2 - 250 + i * 170, row1));
-  const row2 = height - 62;
-  achButton.position.set(width / 2 - 250, row2);
-  skillButton.position.set(width / 2 - 80, row2);
-  prestigeBtn.position.set(width / 2 + 90, row2);
+  // ----- Controles de baixo -----
+  const abs = abilityButtons;
+  const bts = [
+    { btn: achButton, label: achLabel },
+    { btn: skillButton, label: skillLabel },
+    { btn: prestigeBtn, label: prestigeLabel },
+  ];
+  if (portrait) {
+    const pad = 10;
+    const gap = 8;
+    const w3 = Math.floor((width - pad * 2 - gap * 2) / 3);
+    const rowB = height - 46 - pad;
+    const rowA = rowB - 48 - gap - 4;
+    abs.forEach((ab, i) => { fitAbility(ab, w3, 48, true); ab.btn.position.set(pad + i * (w3 + gap), rowA); });
+    bts.forEach((bt, i) => { fitBottom(bt, w3, 46, 12); bt.btn.position.set(pad + i * (w3 + gap), rowB); });
+    ctrlTop = rowA - 8;
+  } else if (landscape) {
+    const gap = 6;
+    const w6 = Math.min(128, Math.floor((width - 20 - gap * 5) / 6));
+    const rowW = w6 * 6 + gap * 5;
+    const x0 = (width - rowW) / 2;
+    const row = height - 40 - 8;
+    abs.forEach((ab, i) => { fitAbility(ab, w6, 40, true); ab.btn.position.set(x0 + i * (w6 + gap), row); });
+    bts.forEach((bt, i) => { fitBottom(bt, w6, 40, 12); bt.btn.position.set(x0 + (i + 3) * (w6 + gap), row); });
+    ctrlTop = row - 8;
+  } else {
+    abs.forEach((ab, i) => { fitAbility(ab, 160, 46, false); ab.btn.position.set(cx - 250 + i * 170, height - 118); });
+    bts.forEach((bt, i) => { fitBottom(bt, 160, 40, 15); bt.btn.position.set(cx - 250 + i * 170, height - 62); });
+    ctrlTop = height - 124;
+  }
 
-  resetBtn.position.set(16, height - 26);
-  achPanel.position.set((width - ACH_W) / 2, Math.max(10, (height - ACH_H) / 2));
+  // ----- Cubo: ocupa o espaço livre entre o HUD e os controles -----
+  const avail = ctrlTop - hudBottom;
+  cubeSize = Math.max(90, Math.min(300, (avail - 24) / 1.32, width * 0.66));
+  baseScale = cubeSize / texture.height;
+  const total = cubeSize * 1.32 + 16;
+  cubeBaseY = hudBottom + Math.max(0, (avail - total) / 2) + cubeSize * 0.5;
+  cube.x = cx;
+
+  // ----- Gavetas laterais -----
+  const top = portrait ? 56 : landscape ? 8 : 96;
+  // em pé, as 4 abas (2 de cada lado, escalonadas) precisam caber acima dos controles
+  const fitH = Math.floor((ctrlTop - top - 92) / 4);
+  const handleH = portrait ? Math.max(70, Math.min(104, fitH)) : landscape ? 84 : 124;
+  const labelSize = landscape || (portrait && handleH < 96) ? 12 : portrait ? 14 : 15;
+  leftDock.configure({ handleH, handleTop: portrait ? 24 : landscape ? 12 : 24, labelSize });
+  // em celular em pé as abas dos dois lados não podem se sobrepor: a direita fica mais embaixo
+  rightDock.configure({
+    handleH,
+    handleTop: portrait ? 24 + 2 * (handleH + 12) + 20 : landscape ? 12 : 24,
+    labelSize,
+  });
+  const dockBottom = portrait || landscape ? ctrlTop - 6 : height - 14;
+  leftDock.layout(width, height, top, dockBottom);
+  rightDock.layout(width, height, top, dockBottom);
+
+  resetBtn.style.fontSize = portrait || landscape ? 11 : 14;
+  resetBtn.position.set(portrait || landscape ? 10 : 16, portrait || landscape ? 6 : height - 26);
+
   drawDeco();
+  if (achPanel.visible) layoutAch();
   if (tree.visible) layoutTree();
+}
+
+// com pouca largura só uma gaveta pode ficar aberta (senão uma cobre a outra)
+const exclusiveDocks = () => app.screen.width < 980;
+for (const [dock, other] of [[leftDock, rightDock], [rightDock, leftDock]]) {
+  const select = dock.select;
+  dock.select = (i) => {
+    select(i);
+    if (dock.open && exclusiveDocks() && other.open) {
+      other.open = false;
+      other.paint();
+    }
+  };
 }
 
 // ---------- Efeitos ----------
@@ -1148,6 +1498,9 @@ const particles = [];
 function spawnFloatingText(x, y, message, opts = {}) {
   const { fill = '#6ad8fe', size = 32, duration = 800, speed = 0.08, isToast = false } = opts;
   const text = txt(message, fill, size, true);
+  text.style.wordWrap = true;
+  text.style.wordWrapWidth = Math.max(160, app.screen.width - 24);
+  text.style.align = 'center';
   text.anchor.set(0.5);
   text.position.set(x, y);
   // entra logo abaixo dos painéis, que ficam sempre na frente
@@ -1158,8 +1511,9 @@ function spawnFloatingText(x, y, message, opts = {}) {
 // avisos perto do cubo; vários ao mesmo tempo ficam empilhados
 function toast(message, fill = '#ffc46b') {
   const stacked = floaters.filter((f) => f.isToast).length;
-  spawnFloatingText(app.screen.width / 2, Math.max(160, app.screen.height / 2 - 190) + stacked * 32, message, {
-    fill, size: 24, duration: 3500, speed: 0.01, isToast: true,
+  const size = layoutMode === 'desktop' ? 24 : 17;
+  spawnFloatingText(app.screen.width / 2, hudBottom + 8 + stacked * (size + 8), message, {
+    fill, size, duration: 3500, speed: 0.01, isToast: true,
   });
 }
 
@@ -1192,11 +1546,12 @@ function spawnGolden() {
   sprite.tint = 0xffc46b;
   sprite.scale.set(80 / texture.height);
 
-  // evita as gavetas laterais
-  const minX = PANEL_W + 70;
-  const maxX = Math.max(minX + 1, app.screen.width - PANEL_W - 70);
-  const minY = 180;
-  const maxY = Math.max(minY + 1, app.screen.height - 150);
+  // evita as gavetas laterais (no celular elas ficam recolhidas)
+  const side = layoutMode === 'desktop' ? PANEL_W + 70 : 40;
+  const minX = side;
+  const maxX = Math.max(minX + 1, app.screen.width - side);
+  const minY = hudBottom + 20;
+  const maxY = Math.max(minY + 1, ctrlTop - 40);
   sprite.position.set(minX + Math.random() * (maxX - minX), minY + Math.random() * (maxY - minY));
 
   sprite.eventMode = 'static';
@@ -1244,7 +1599,7 @@ cube.on('pointerdown', (event) => {
 
 // ---------- Estado inicial da interface ----------
 // em telas estreitas as gavetas começam recolhidas para não cobrir o cubo
-const narrow = app.screen.width < 1100;
+const narrow = app.screen.width < 1100 || app.screen.height < 520;
 rightDock.restore(savedUi?.r ?? { open: !narrow, active: 1 });
 leftDock.restore(savedUi?.l ?? { open: !narrow, active: 0 });
 paintModeButtons();
@@ -1340,11 +1695,11 @@ app.ticker.add((ticker) => {
       else perksPage.root.removeChild(perksEmpty);
     }
 
-    const w = 240;
+    const { y: xy, w } = xpLayout;
     const p = Math.min(1, Math.max(0, levelProgress()));
     xpBar.clear()
-      .roundRect(app.screen.width / 2 - w / 2, 126, w, 6, 3).fill(0x16203a)
-      .roundRect(app.screen.width / 2 - w / 2, 126, Math.max(4, w * p), 6, 3).fill(0x6ad8fe);
+      .roundRect(app.screen.width / 2 - w / 2, xy, w, 6, 3).fill(0x16203a)
+      .roundRect(app.screen.width / 2 - w / 2, xy, Math.max(4, w * p), 6, 3).fill(0x6ad8fe);
 
     const pending = pendingChips();
     prestigeLabel.text = `Evoluir: +${pending} chip(s)`;
@@ -1416,6 +1771,7 @@ if (import.meta.env.DEV) {
         owned: Object.fromEntries(upgrades.map((u) => [u.id, u.owned])),
         bps: getBps(), perClick: getBitsPerClick(), golden: !!golden,
         docks: { l: leftDock.state(), r: rightDock.state() },
+        layoutMode,
       };
     },
   };
