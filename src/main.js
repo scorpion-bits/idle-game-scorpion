@@ -7,6 +7,8 @@ import {
   C, T, txt, hex, darken, lighten, drawCard, makeButton, createScroll, createDock,
 } from './ui.js';
 import { tween, ease, updateTweens, cancelTweens } from './anim.js';
+import { settings, setSetting, onSettingsChange } from './settings.js';
+import { sfx, unlockAudio, applyVolume, haptic } from './sfx.js';
 
 const app = new Application();
 await app.init({
@@ -163,12 +165,17 @@ function planBuy(u) {
 
 function buy(u) {
   const { n, cost, ok } = planBuy(u);
-  if (!ok) return;
+  if (!ok) {
+    sfx.deny();
+    return;
+  }
+  sfx.buy();
   const before = levelOf(u);
   bits -= cost;
   u.owned += n;
   const after = levelOf(u);
   if (after > before) {
+    sfx.levelUp();
     toast(`${u.name} subiu para o nível ${after}! (+${Math.round((LEVEL_BASE_BONUS + mods.levelBonus) * 100)}%)`, '#7ee2a8');
   }
   updateShop();
@@ -177,7 +184,12 @@ function buy(u) {
 }
 
 function buyImprovement(imp) {
-  if (bought.has(imp.id) || bits < imp.cost) return;
+  if (bought.has(imp.id)) return;
+  if (bits < imp.cost) {
+    sfx.deny();
+    return;
+  }
+  sfx.buy();
   bits -= imp.cost;
   bought.add(imp.id);
   updateShop();
@@ -236,6 +248,7 @@ function checkAchievements() {
   for (const a of achievements) {
     if (!unlocked.has(a.id) && a.test()) {
       unlocked.add(a.id);
+      sfx.achievement();
       toast(`Conquista: ${a.name}`, '#ffc46b');
       refreshAchievements();
       save();
@@ -303,7 +316,6 @@ function load() {
 const lastSave = load();
 
 // ---------- Cenário: fundo suave, partículas flutuantes e pedestal ----------
-const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 const bgG = new Graphics();
 const moteLayer = new Container();
@@ -372,7 +384,7 @@ function drawHalo() {
 
 // partículas flutuando devagar (aceleram e esquentam durante o Frenesi)
 const moteTexture = app.renderer.generateTexture(new Graphics().circle(0, 0, 4).fill(0xffffff));
-const motesData = Array.from({ length: reduceMotion ? 0 : 34 }, () => {
+const motesData = Array.from({ length: 34 }, () => {
   const sprite = new Sprite(moteTexture);
   sprite.anchor.set(0.5);
   moteLayer.addChild(sprite);
@@ -383,6 +395,8 @@ const motesData = Array.from({ length: reduceMotion ? 0 : 34 }, () => {
 });
 
 function updateMotes(dt) {
+  moteLayer.visible = settings.motion;
+  if (!settings.motion) return;
   const { width: W, height: H } = app.screen;
   const mul = frenzyLeft > 0 ? 2.4 : 1;
   const now = performance.now();
@@ -402,7 +416,7 @@ function updateMotes(dt) {
 
 // ondas que se espalham pelo pedestal a cada clique
 const rippleList = [];
-const addRipple = (strength = 1) => rippleList.push({ t: 0, s: strength });
+const addRipple = (strength = 1) => { if (settings.motion) rippleList.push({ t: 0, s: strength }); };
 
 function updateRipples(dt) {
   ripples.clear();
@@ -455,19 +469,12 @@ frenzyText.anchor.set(0.5, 0);
 app.stage.addChild(frenzyText);
 for (const el of [counter, bpsText, metaText, frenzyText, xpBar]) el.eventMode = 'none';
 
-const resetBtn = txt('Resetar jogo', T.faint, 12);
-resetBtn.eventMode = 'static';
-resetBtn.cursor = 'pointer';
-resetBtn.on('pointerover', () => tween(resetBtn, { alpha: 0.6 }, 120));
-resetBtn.on('pointerout', () => tween(resetBtn, { alpha: 1 }, 120));
-resetBtn.on('pointerdown', () => {
-  if (confirm('Apagar todo o progresso?')) {
-    resetting = true;
-    try { localStorage.removeItem(SAVE_KEY); } catch { /* sem localStorage */ }
-    location.reload();
-  }
-});
-app.stage.addChild(resetBtn);
+function resetGame() {
+  if (!confirm('Apagar todo o progresso?')) return;
+  resetting = true;
+  try { localStorage.removeItem(SAVE_KEY); } catch { /* sem localStorage */ }
+  location.reload();
+}
 
 // ---------- Gavetas laterais ----------
 const PANEL_W = 300;
@@ -495,6 +502,7 @@ const modeButtons = BUY_MODES.map((mode, i) => {
 rightDock.setHeader(modeBar, 40);
 
 function setBuyMode(mode) {
+  sfx.tick();
   buyMode = mode;
   paintModeButtons();
   updateShop();
@@ -660,7 +668,11 @@ const abilityButtons = abilityDefs.map((a) => {
 
 function useAbility(a) {
   const s = abilities[a.id];
-  if (s.cd > 0) return;
+  if (s.cd > 0) {
+    sfx.deny();
+    return;
+  }
+  sfx.boost();
   if (a.id === 'sprint') {
     const gain = getBps() * 600;
     if (gain < 1) {
@@ -742,6 +754,8 @@ function prestige() {
   );
   if (!ok) return;
 
+  sfx.prestige();
+  haptic(30);
   chips += gain;
   prestiges++;
   bits = 0;
@@ -768,6 +782,7 @@ function showModal(panel) {
   const { width: W, height: H } = app.screen;
   dim.clear().rect(0, 0, W, H).fill(0x04070f);
   dim.visible = true;
+  sfx.open();
   tween(dim, { alpha: 0.62 }, 260);
   const y = panel.y;
   panel.visible = true;
@@ -777,7 +792,8 @@ function showModal(panel) {
 }
 
 function hideModal(panel) {
-  tween(dim, { alpha: 0 }, 220, { onDone: () => { if (!tree.visible && !achPanel.visible) dim.visible = false; } });
+  sfx.close();
+  tween(dim, { alpha: 0 }, 220, { onDone: () => { if (!tree.visible && !achPanel.visible && !settingsPanel.visible) dim.visible = false; } });
   const y = panel.y;
   tween(panel, { alpha: 0, y: y + 12 }, 220, {
     onDone: () => {
@@ -790,6 +806,7 @@ function hideModal(panel) {
 function closeModals() {
   if (tree.visible) toggleTree(false);
   if (achPanel.visible) toggleAchievements(false);
+  if (settingsPanel.visible) toggleSettings(false);
 }
 
 // ---------- Painel de conquistas (rolável; 2 colunas em telas largas) ----------
@@ -1249,9 +1266,11 @@ function buySkill(s) {
   const state = skillState(s);
   if (state === 'owned') return;
   if (state !== 'buyable') {
+    if (state === 'available') sfx.deny();
     showTip(s);
     return;
   }
+  sfx.skill();
   skillsOwned.add(s.id);
   recomputeMods();
   refreshTree();
@@ -1473,6 +1492,10 @@ function toggleTree(open = !tree.visible) {
       cancelTweens(achPanel);
       achPanel.visible = false;
     }
+    if (settingsPanel.visible) {
+      cancelTweens(settingsPanel);
+      settingsPanel.visible = false;
+    }
     cancelTweens(tree);
     tree.alpha = 1;
     layoutTree();
@@ -1490,6 +1513,10 @@ function toggleAchievements(open = !achPanel.visible) {
       cancelTweens(tree);
       tree.visible = false;
     }
+    if (settingsPanel.visible) {
+      cancelTweens(settingsPanel);
+      settingsPanel.visible = false;
+    }
     cancelTweens(achPanel);
     layoutAch();
     showModal(achPanel);
@@ -1502,7 +1529,179 @@ achButton.on('pointertap', () => toggleAchievements());
 achClose.on('pointertap', () => toggleAchievements(false));
 skillButton.on('pointertap', () => toggleTree());
 
-app.stage.addChild(dim, achPanel, tree);
+// ---------- Configurações ----------
+const settingsPanel = new Container();
+settingsPanel.visible = false;
+settingsPanel.eventMode = 'static';
+const setBg = new Graphics();
+const setTitle = txt('Configurações', T.text, 19, true);
+const setClose = labeledButton(84, 30, 'Fechar', C.warn, T.warn, 13);
+settingsPanel.addChild(setBg, setTitle, setClose);
+setClose.on('pointertap', () => toggleSettings(false));
+
+// interruptor: a bolinha desliza e a trilha muda de cor
+function makeSwitch(get, set) {
+  const c = new Container();
+  const track = new Graphics();
+  const knob = new Graphics().circle(0, 0, 9).fill(0xffffff);
+  knob.y = 12;
+  c.addChild(track, knob);
+  c.eventMode = 'static';
+  c.cursor = 'pointer';
+  c.hitArea = new Rectangle(-8, -8, 60, 40);
+  c.paint = (animate = true) => {
+    const on = get();
+    track.clear().roundRect(0, 0, 44, 24, 12)
+      .fill({ color: on ? C.good : 0xffffff, alpha: on ? 0.55 : 0.12 });
+    if (animate) tween(knob, { x: on ? 32 : 12 }, 160);
+    else knob.x = on ? 32 : 12;
+  };
+  c.on('pointertap', () => {
+    set(!get());
+    c.paint();
+    sfx.tick();
+  });
+  c.paint(false);
+  return c;
+}
+
+const settingRows = [];
+function addToggleRow(label, hint, key, onSet) {
+  const title = txt(label, T.text, 15);
+  const sub = txt(hint, T.faint, 12);
+  const sw = makeSwitch(() => settings[key], (v) => { setSetting(key, v); onSet?.(v); });
+  settingsPanel.addChild(title, sub, sw);
+  settingRows.push({ title, sub, sw, height: 56 });
+}
+
+addToggleRow('Efeitos sonoros', 'Cliques, compras e conquistas', 'sound', (v) => { if (v) unlockAudio(); applyVolume(); });
+// volume: trilha arrastável
+const VOL_W = 300;
+const volTitle = txt('Volume', T.text, 15);
+const volValue = txt('', T.dim, 13);
+const volTrack = new Container();
+const volBar = new Graphics();
+const volKnob = new Graphics().circle(0, 0, 10).fill(0xffffff);
+volTrack.addChild(volBar, volKnob);
+volTrack.eventMode = 'static';
+volTrack.cursor = 'pointer';
+volTrack.hitArea = new Rectangle(-12, -16, VOL_W + 24, 32);
+settingsPanel.addChild(volTitle, volValue, volTrack);
+
+function paintVolume() {
+  const v = settings.volume;
+  volBar.clear()
+    .roundRect(0, -2, VOL_W, 4, 2).fill({ color: 0xffffff, alpha: 0.14 })
+    .roundRect(0, -2, Math.max(4, VOL_W * v), 4, 2).fill(C.accent);
+  volKnob.x = VOL_W * v;
+  volValue.text = `${Math.round(v * 100)}%`;
+}
+let volDrag = false;
+function setVolumeFromGlobal(gx) {
+  const lx = volTrack.toLocal({ x: gx, y: 0 }).x;
+  setSetting('volume', Math.min(1, Math.max(0, lx / VOL_W)));
+  applyVolume();
+  paintVolume();
+}
+volTrack.on('pointerdown', (e) => {
+  volDrag = true;
+  unlockAudio();
+  setVolumeFromGlobal(e.global.x);
+});
+app.stage.on('pointermove', (e) => { if (volDrag) setVolumeFromGlobal(e.global.x); });
+const endVolDrag = () => {
+  if (!volDrag) return;
+  volDrag = false;
+  sfx.click();
+};
+app.stage.on('pointerup', endVolDrag);
+app.stage.on('pointerupoutside', endVolDrag);
+
+addToggleRow('Animações e partículas', 'Ondas e partículas decorativas', 'motion');
+addToggleRow('Vibração', 'Toques curtos no celular', 'haptics');
+
+const resetRow = labeledButton(340, 38, 'Apagar progresso e recomeçar', C.bad, T.bad, 13);
+settingsPanel.addChild(resetRow);
+resetRow.on('pointertap', resetGame);
+
+function layoutSettings() {
+  const { width, height } = app.screen;
+  const w = Math.min(420, width - 24);
+  paintVolume();   // atualiza o texto da porcentagem antes de medir a largura
+  let y = 64;
+  const rowsBefore = settingRows.slice(0, 1);
+  const rowsAfter = settingRows.slice(1);
+  const placeRow = (r) => {
+    r.title.position.set(24, y + 8);
+    r.sub.position.set(24, y + 30);
+    r.sw.position.set(w - 24 - 44, y + 14);
+    y += r.height;
+  };
+  rowsBefore.forEach(placeRow);
+
+  // volume (ocupa duas linhas)
+  volTitle.position.set(24, y + 8);
+  volValue.position.set(w - 24 - volValue.width, y + 9);
+  const trackW = w - 48 - 20;
+  volTrack.scale.x = trackW / VOL_W;
+  volTrack.position.set(24 + 10, y + 50);
+  y += 76;
+
+  rowsAfter.forEach(placeRow);
+  y += 8;
+  fitButton(resetRow, w - 48, 38);
+  resetRow.position.set(24, y);
+  y += 38 + 22;
+  const h = y;
+
+  drawCard(setBg, w, h, { fill: C.panel, fillAlpha: 0.98, radius: 24 });
+  setTitle.position.set(24, 20);
+  setClose.position.set(w - 84 - 20, 16);
+  settingsPanel.position.set((width - w) / 2, Math.max(8, (height - h) / 2));
+  paintVolume();
+  for (const r of settingRows) r.sw.paint(false);
+}
+
+function toggleSettings(open = !settingsPanel.visible) {
+  if (open) {
+    if (tree.visible) {
+      cancelTweens(tree);
+      tree.visible = false;
+    }
+    if (achPanel.visible) {
+      cancelTweens(achPanel);
+      achPanel.visible = false;
+    }
+    cancelTweens(settingsPanel);
+    layoutSettings();
+    showModal(settingsPanel);
+  } else if (settingsPanel.visible) {
+    hideModal(settingsPanel);
+  }
+}
+
+// botão de engrenagem (canto superior direito); gira ao passar o mouse
+const gearBtn = makeButton(36, 36, { tint: C.accent, radius: 18, alpha: 0.06 });
+const gearIcon = new Graphics();
+gearIcon.circle(0, 0, 7.5).stroke({ width: 3, color: 0xe8eefc, alpha: 0.9 });
+for (let i = 0; i < 8; i++) {
+  const a = (i * Math.PI) / 4;
+  gearIcon.moveTo(Math.cos(a) * 8.5, Math.sin(a) * 8.5).lineTo(Math.cos(a) * 12, Math.sin(a) * 12);
+}
+gearIcon.stroke({ width: 3.2, color: 0xe8eefc, alpha: 0.9 });
+gearIcon.circle(0, 0, 2.5).fill({ color: 0xe8eefc, alpha: 0.9 });
+gearIcon.position.set(18, 18);
+gearBtn.addChild(gearIcon);
+gearBtn.on('pointerover', () => tween(gearIcon, { rotation: Math.PI / 2 }, 600));
+gearBtn.on('pointerout', () => tween(gearIcon, { rotation: 0 }, 600));
+gearBtn.on('pointertap', () => toggleSettings());
+app.stage.addChild(gearBtn);
+
+onSettingsChange((key) => {
+  if (key === 'sound' || key === 'volume') applyVolume();
+});
+
+app.stage.addChild(dim, achPanel, tree, settingsPanel);
 
 // ---------- Avisos (toasts): pílulas suaves que descem e somem ----------
 const toastLayer = new Container();
@@ -1562,7 +1761,7 @@ const canvasPoint = (e) => {
 
 // qual área rolável está sob o ponto (gaveta ativa ou painel de conquistas)
 function scrollTargetAt(px, py) {
-  if (tree.visible) return null;
+  if (tree.visible || settingsPanel.visible) return null;
   if (achPanel.visible) {
     const inside = px >= achPanel.x && px <= achPanel.x + achW && py >= achPanel.y && py <= achPanel.y + achScroll.viewH + 84;
     return inside ? achScroll : null;
@@ -1598,6 +1797,7 @@ app.canvas.addEventListener('wheel', (e) => {
 // toque: arrastar o dedo rola a lista; um arrasto nunca vira clique em botão
 let touchScroll = null;
 app.canvas.addEventListener('pointerdown', (e) => {
+  unlockAudio();
   uiMoved = false;
   if (e.pointerType === 'mouse') return;
   const { x, y } = canvasPoint(e);
@@ -1724,8 +1924,7 @@ function layout() {
   leftDock.layout(width, height, top, dockBottom);
   rightDock.layout(width, height, top, dockBottom);
 
-  resetBtn.style.fontSize = portrait || landscape ? 11 : 12;
-  resetBtn.position.set(portrait || landscape ? 10 : 18, portrait || landscape ? 6 : 12);
+  gearBtn.position.set(width - 36 - (portrait ? 10 : 16), portrait || landscape ? 8 : 14);
 
   drawBackground();
   drawPedestal();
@@ -1741,6 +1940,8 @@ for (const [dock, other] of [[leftDock, rightDock], [rightDock, leftDock]]) {
   const select = dock.select;
   dock.select = (i) => {
     select(i);
+    if (dock.open) sfx.tick();
+    else sfx.close();
     if (dock.open && exclusiveDocks() && other.open) {
       other.open = false;
       other.paint();
@@ -1766,6 +1967,7 @@ function spawnFloatingText(x, y, message, opts = {}) {
 }
 
 function spawnParticles(x, y) {
+  if (!settings.motion) return;
   for (let i = 0; i < 7; i++) {
     const g = new Graphics()
       .circle(0, 0, 2 + Math.random() * 2.5)
@@ -1810,6 +2012,7 @@ function spawnGolden() {
   sprite.on('pointerdown', collectGolden);
   app.stage.addChildAt(sprite, app.stage.getChildIndex(dim));
   golden = { sprite, life: 0 };
+  sfx.goldenSpawn();
 }
 
 function removeGolden() {
@@ -1822,7 +2025,10 @@ function removeGolden() {
 function collectGolden() {
   if (!golden) return;
   goldenClicks++;
+  sfx.goldenCollect();
+  haptic(15);
   if (Math.random() < 0.5) {
+    sfx.boost();
     frenzyLeft = FRENZY_MS * mods.frenzyDur;
     toast(`Frenesi! Produção x${frenzyMult()} por ${Math.round(frenzyLeft / 1000)}s`, '#f2c98a');
   } else {
@@ -1843,6 +2049,8 @@ cube.on('pointerdown', (event) => {
   earn(gain);
   clicks++;
 
+  sfx.click();
+  haptic(6);
   cubeFx.kick = 0.92;
   counter.scale.set(1.035);
   tween(counter, { scale: 1 }, 200);
@@ -1871,7 +2079,7 @@ for (const dock of [leftDock, rightDock]) dock.activePage()?.playIn(dock.side ==
 
 // ---------- Entrada suave ao abrir o jogo ----------
 function intro() {
-  if (reduceMotion) return;
+  if (!settings.motion) return;
   const rise = (obj, dy, delay) => {
     const y = obj.y;
     obj.alpha = 0;
@@ -2013,12 +2221,12 @@ app.ticker.add((ticker) => {
   }
 
   // cubo: volta ao tamanho normal, "respira" e flutua; o halo acompanha
-  const breathe = reduceMotion ? 1 : 1 + 0.012 * Math.sin(performance.now() / 900);
+  const breathe = !settings.motion ? 1 : 1 + 0.012 * Math.sin(performance.now() / 900);
   cubeFx.kick += (1 - cubeFx.kick) * Math.min(1, dt * 0.012);
   cube.scale.set(baseScale * cubeFx.kick * cubeFx.intro * breathe);
-  cube.y = cubeBaseY + (reduceMotion ? 0 : Math.sin(performance.now() / 700) * 6);
+  cube.y = cubeBaseY + (!settings.motion ? 0 : Math.sin(performance.now() / 700) * 6);
   halo.position.set(cube.x, cube.y);
-  halo.alpha = 0.8 + (reduceMotion ? 0 : 0.2 * Math.sin(performance.now() / 1300));
+  halo.alpha = 0.8 + (!settings.motion ? 0 : 0.2 * Math.sin(performance.now() / 1300));
 
   for (let i = floaters.length - 1; i >= 0; i--) {
     const f = floaters[i];
@@ -2058,7 +2266,7 @@ document.addEventListener('visibilitychange', () => {
 // ---------- Ganchos de depuração (somente em `npm run dev`) ----------
 if (import.meta.env.DEV) {
   window.__idle = {
-    earn, spawnGolden, collectGolden, prestige, checkAchievements, pendingChips, setBuyMode,
+    sfx, settings, earn, spawnGolden, collectGolden, prestige, checkAchievements, pendingChips, setBuyMode,
     buySkill, toggleTree, toggleAchievements, useAbility, SKILLS, leftDock, rightDock,
     hitObj: (x, y) => app.renderer.events.rootBoundary.hitTest(x, y),
     hit: (x, y) => {
@@ -2081,6 +2289,7 @@ if (import.meta.env.DEV) {
         bps: getBps(), perClick: getBitsPerClick(), golden: !!golden,
         docks: { l: leftDock.state(), r: rightDock.state() },
         layoutMode,
+        modal: tree.visible ? 'tree' : achPanel.visible ? 'ach' : settingsPanel.visible ? 'settings' : null,
       };
     },
   };
