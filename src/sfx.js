@@ -19,6 +19,8 @@ export function unlockAudio() {
   applyVolume();
 }
 
+export const getAudioContext = () => ctx;
+
 export function applyVolume() {
   if (master) master.gain.value = settings.sound ? settings.volume * 0.7 : 0;
 }

@@ -9,6 +9,7 @@ import {
 import { tween, ease, updateTweens, cancelTweens } from './anim.js';
 import { settings, setSetting, onSettingsChange } from './settings.js';
 import { sfx, unlockAudio, applyVolume, haptic } from './sfx.js';
+import { startMusic, stopMusic, updateMusicVolume, musicState } from './music.js';
 
 const app = new Application();
 await app.init({
@@ -1566,57 +1567,72 @@ function makeSwitch(get, set) {
 }
 
 const settingRows = [];
+const SLIDER_W = 300;
+
 function addToggleRow(label, hint, key, onSet) {
   const title = txt(label, T.text, 15);
   const sub = txt(hint, T.faint, 12);
   const sw = makeSwitch(() => settings[key], (v) => { setSetting(key, v); onSet?.(v); });
   settingsPanel.addChild(title, sub, sw);
-  settingRows.push({ title, sub, sw, height: 56 });
+  settingRows.push({ type: 'toggle', title, sub, sw, height: 56 });
+}
+
+// slider arrastável (0..1) ligado a uma configuração
+function addSliderRow(label, key, onChange, previewSound = false) {
+  const title = txt(label, T.text, 15);
+  const value = txt('', T.dim, 13);
+  const track = new Container();
+  const bar = new Graphics();
+  const knob = new Graphics().circle(0, 0, 10).fill(0xffffff);
+  track.addChild(bar, knob);
+  track.eventMode = 'static';
+  track.cursor = 'pointer';
+  track.hitArea = new Rectangle(-12, -16, SLIDER_W + 24, 32);
+  settingsPanel.addChild(title, value, track);
+
+  const row = { type: 'slider', title, value, track, height: 76 };
+  row.paint = () => {
+    const v = settings[key];
+    bar.clear()
+      .roundRect(0, -2, SLIDER_W, 4, 2).fill({ color: 0xffffff, alpha: 0.14 })
+      .roundRect(0, -2, Math.max(4, SLIDER_W * v), 4, 2).fill(C.accent);
+    knob.x = SLIDER_W * v;
+    value.text = `${Math.round(v * 100)}%`;
+  };
+  let dragging = false;
+  const setFrom = (gx) => {
+    const lx = track.toLocal({ x: gx, y: 0 }).x;
+    setSetting(key, Math.min(1, Math.max(0, lx / SLIDER_W)));
+    onChange?.();
+    row.paint();
+  };
+  track.on('pointerdown', (e) => {
+    dragging = true;
+    unlockAudio();
+    setFrom(e.global.x);
+  });
+  app.stage.on('pointermove', (e) => { if (dragging) setFrom(e.global.x); });
+  const end = () => {
+    if (!dragging) return;
+    dragging = false;
+    if (previewSound) sfx.click();
+  };
+  app.stage.on('pointerup', end);
+  app.stage.on('pointerupoutside', end);
+  settingRows.push(row);
 }
 
 addToggleRow('Efeitos sonoros', 'Cliques, compras e conquistas', 'sound', (v) => { if (v) unlockAudio(); applyVolume(); });
-// volume: trilha arrastável
-const VOL_W = 300;
-const volTitle = txt('Volume', T.text, 15);
-const volValue = txt('', T.dim, 13);
-const volTrack = new Container();
-const volBar = new Graphics();
-const volKnob = new Graphics().circle(0, 0, 10).fill(0xffffff);
-volTrack.addChild(volBar, volKnob);
-volTrack.eventMode = 'static';
-volTrack.cursor = 'pointer';
-volTrack.hitArea = new Rectangle(-12, -16, VOL_W + 24, 32);
-settingsPanel.addChild(volTitle, volValue, volTrack);
-
-function paintVolume() {
-  const v = settings.volume;
-  volBar.clear()
-    .roundRect(0, -2, VOL_W, 4, 2).fill({ color: 0xffffff, alpha: 0.14 })
-    .roundRect(0, -2, Math.max(4, VOL_W * v), 4, 2).fill(C.accent);
-  volKnob.x = VOL_W * v;
-  volValue.text = `${Math.round(v * 100)}%`;
-}
-let volDrag = false;
-function setVolumeFromGlobal(gx) {
-  const lx = volTrack.toLocal({ x: gx, y: 0 }).x;
-  setSetting('volume', Math.min(1, Math.max(0, lx / VOL_W)));
-  applyVolume();
-  paintVolume();
-}
-volTrack.on('pointerdown', (e) => {
-  volDrag = true;
-  unlockAudio();
-  setVolumeFromGlobal(e.global.x);
+addSliderRow('Volume dos efeitos', 'volume', applyVolume, true);
+addToggleRow('Música', 'Trilha de fundo em loop', 'music', (v) => {
+  if (v) {
+    unlockAudio();
+    startMusic();
+  } else {
+    stopMusic();
+  }
 });
-app.stage.on('pointermove', (e) => { if (volDrag) setVolumeFromGlobal(e.global.x); });
-const endVolDrag = () => {
-  if (!volDrag) return;
-  volDrag = false;
-  sfx.click();
-};
-app.stage.on('pointerup', endVolDrag);
-app.stage.on('pointerupoutside', endVolDrag);
-
+addSliderRow('Volume da música', 'musicVolume', updateMusicVolume);
 addToggleRow('Animações e partículas', 'Ondas e partículas decorativas', 'motion');
 addToggleRow('Vibração', 'Toques curtos no celular', 'haptics');
 
@@ -1627,27 +1643,21 @@ resetRow.on('pointertap', resetGame);
 function layoutSettings() {
   const { width, height } = app.screen;
   const w = Math.min(420, width - 24);
-  paintVolume();   // atualiza o texto da porcentagem antes de medir a largura
+  for (const r of settingRows) r.paint?.();   // atualiza textos antes de medir
   let y = 64;
-  const rowsBefore = settingRows.slice(0, 1);
-  const rowsAfter = settingRows.slice(1);
-  const placeRow = (r) => {
-    r.title.position.set(24, y + 8);
-    r.sub.position.set(24, y + 30);
-    r.sw.position.set(w - 24 - 44, y + 14);
+  for (const r of settingRows) {
+    if (r.type === 'toggle') {
+      r.title.position.set(24, y + 8);
+      r.sub.position.set(24, y + 30);
+      r.sw.position.set(w - 24 - 44, y + 14);
+    } else {
+      r.title.position.set(24, y + 8);
+      r.value.position.set(w - 24 - r.value.width, y + 9);
+      r.track.scale.x = (w - 48 - 20) / SLIDER_W;
+      r.track.position.set(24 + 10, y + 50);
+    }
     y += r.height;
-  };
-  rowsBefore.forEach(placeRow);
-
-  // volume (ocupa duas linhas)
-  volTitle.position.set(24, y + 8);
-  volValue.position.set(w - 24 - volValue.width, y + 9);
-  const trackW = w - 48 - 20;
-  volTrack.scale.x = trackW / VOL_W;
-  volTrack.position.set(24 + 10, y + 50);
-  y += 76;
-
-  rowsAfter.forEach(placeRow);
+  }
   y += 8;
   fitButton(resetRow, w - 48, 38);
   resetRow.position.set(24, y);
@@ -1657,9 +1667,11 @@ function layoutSettings() {
   drawCard(setBg, w, h, { fill: C.panel, fillAlpha: 0.98, radius: 24 });
   setTitle.position.set(24, 20);
   setClose.position.set(w - 84 - 20, 16);
-  settingsPanel.position.set((width - w) / 2, Math.max(8, (height - h) / 2));
-  paintVolume();
-  for (const r of settingRows) r.sw.paint(false);
+  // em telas baixas (celular deitado) o painel encolhe para caber
+  const fit = Math.min(1, (height - 16) / h);
+  settingsPanel.scale.set(fit);
+  settingsPanel.position.set((width - w * fit) / 2, (height - h * fit) / 2);
+  for (const r of settingRows) r.sw?.paint(false);
 }
 
 function toggleSettings(open = !settingsPanel.visible) {
@@ -1798,6 +1810,7 @@ app.canvas.addEventListener('wheel', (e) => {
 let touchScroll = null;
 app.canvas.addEventListener('pointerdown', (e) => {
   unlockAudio();
+  startMusic();
   uiMoved = false;
   if (e.pointerType === 'mouse') return;
   const { x, y } = canvasPoint(e);
@@ -2266,7 +2279,7 @@ document.addEventListener('visibilitychange', () => {
 // ---------- Ganchos de depuração (somente em `npm run dev`) ----------
 if (import.meta.env.DEV) {
   window.__idle = {
-    sfx, settings, earn, spawnGolden, collectGolden, prestige, checkAchievements, pendingChips, setBuyMode,
+    sfx, settings, musicState, toggleSettings, earn, spawnGolden, collectGolden, prestige, checkAchievements, pendingChips, setBuyMode,
     buySkill, toggleTree, toggleAchievements, useAbility, SKILLS, leftDock, rightDock,
     hitObj: (x, y) => app.renderer.events.rootBoundary.hitTest(x, y),
     hit: (x, y) => {
