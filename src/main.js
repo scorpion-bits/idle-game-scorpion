@@ -1,7 +1,7 @@
 import { Application, Assets, Sprite, Container, Graphics, Rectangle } from 'pixi.js';
 import { UPGRADE_DEFS, makeImprovements } from './data.js';
 import {
-  SKILLS, BRANCHES, RING_R0, RING_STEP, spokeAngle, branchStart, newMods, computeMods,
+  SKILLS, BRANCHES, RING_R0, RING_STEP, spokeAngle, branchStart, twistAt, newMods, computeMods,
 } from './skills.js';
 import {
   txt, hex, darken, lighten, drawSlab, makeSlabButton, createScroll, createDock,
@@ -26,7 +26,7 @@ const GOLDEN_MAX_MS = 120000;
 const GOLDEN_LIFE_MS = 12000;
 const CHIP_DIVISOR = 1e5;            // runBits necessários para o 1º chip
 const BUY_MODES = [1, 10, 100, 'max'];
-const ISO = 0.58;                    // achatamento vertical da projeção isométrica
+const ISO = 1;                       // achatamento vertical da mandala (1 = círculo; 0.58 = chão isométrico)
 
 // ---------- Estado ----------
 let bits = 0;
@@ -658,7 +658,7 @@ const NODE_S = 17;                         // tamanho do cubo de cada nó
 const TREE_HEAD = 60;
 const TREE_FOOT = 52;
 const R_MAX = RING_R0 + 9 * RING_STEP;
-const HINT = 'Arraste para mover · Roda do mouse: zoom · Clique em um nó brilhante para comprar';
+const HINT = 'Arraste para mover · roda do mouse: zoom · clique em um nó brilhante para comprar';
 
 const tree = new Container();
 tree.visible = false;
@@ -676,7 +676,7 @@ treeViewport.addChild(world);
 treeViewport.mask = treeMask;
 
 const treeTitle = txt('Árvore de Habilidades', '#eef5fb', 21, true);
-treeTitle.position.set(22, 16);
+treeTitle.position.set(22, 11);
 
 const pointsChip = makeSlabButton(170, 30, 0x16203a, 0x6ad8fe, { depth: 3, cut: 7 });
 pointsChip.eventMode = 'none';
@@ -696,6 +696,18 @@ const closeLabel = txt('Fechar', '#ffc46b', 14, true);
 closeLabel.anchor.set(0.5);
 closeLabel.position.set(46, 15);
 treeClose.addChild(closeLabel);
+
+function smallButton(w, label, face, edge, color) {
+  const b = makeSlabButton(w, 28, face, edge, { depth: 3, cut: 7 });
+  const t = txt(label, color, 15, true);
+  t.anchor.set(0.5);
+  t.position.set(w / 2, 14);
+  b.addChild(t);
+  return b;
+}
+const zoomOut = smallButton(34, '-', 0x16203a, 0x3a4a63, '#eef5fb');
+const zoomIn = smallButton(34, '+', 0x16203a, 0x3a4a63, '#eef5fb');
+const zoomFit = smallButton(108, 'Centralizar', 0x16203a, 0x3a4a63, '#9fb3c8');
 
 const legend = new Container();
 const legendItems = BRANCHES.map((b, i) => {
@@ -729,7 +741,7 @@ const tipStatus = txt('', '#6ad8fe', 13, true);
 const tipLine = new Graphics();
 tip.addChild(tipBg, tipLine, tipTag, tipName, tipDesc, tipStatus);
 
-tree.addChild(treeBg, treeViewport, treeMask, treeTitle, pointsChip, treeRespec, treeClose, legend, hintText, tip);
+tree.addChild(treeBg, treeViewport, treeMask, treeTitle, pointsChip, treeRespec, treeClose, legend, hintText, zoomOut, zoomIn, zoomFit, tip);
 
 // projeção: plano do chão achatado (isométrico)
 const project = (x, y) => ({ x, y: y * ISO });
@@ -744,51 +756,67 @@ function drawCube(g, s, height, top, left, right, edge, edgeAlpha = 0.9) {
     .stroke({ width: 1.4, color: edge, alpha: edgeAlpha });
 }
 
-// decoração fixa da mandala: anéis, raios, setores e núcleo
+// ponto no chão da mandala (raio r, ângulo a) já projetado
+const polar = (r, a) => project(Math.cos(a) * r, Math.sin(a) * r);
+
+// decoração fixa da mandala: setores em espiral, anéis e núcleo
 function drawMandalaDecor() {
   decorG.clear();
-  const wedgeR = R_MAX + 46;
+  const outer = R_MAX + 40;
+  const SAMPLES = 28;
 
   BRANCHES.forEach((b, i) => {
     const a0 = branchStart(i);
     const a1 = branchStart(i + 1);
-    const pts = [0, 0];
-    for (let n = 0; n <= 24; n++) {
-      const a = a0 + ((a1 - a0) * n) / 24;
-      const p = project(Math.cos(a) * wedgeR, Math.sin(a) * wedgeR);
-      pts.push(p.x, p.y);
+    const edge = (a) => {
+      const pts = [];
+      for (let n = 0; n <= SAMPLES; n++) {
+        const r = (outer * n) / SAMPLES;
+        pts.push(polar(r, a + twistAt(r)));
+      }
+      return pts;
+    };
+    const e0 = edge(a0);
+    const e1 = edge(a1);
+    const arc = [];
+    for (let n = 0; n <= 12; n++) {
+      const a = a0 + ((a1 - a0) * n) / 12;
+      arc.push(polar(outer, a + twistAt(outer)));
     }
-    decorG.poly(pts).fill({ color: b.color, alpha: 0.045 });
-    const e = project(Math.cos(a0) * wedgeR, Math.sin(a0) * wedgeR);
-    decorG.moveTo(0, 0).lineTo(e.x, e.y).stroke({ width: 1.5, color: b.color, alpha: 0.22 });
+    const flat = [...e0, ...arc, ...e1.reverse()].flatMap((q) => [q.x, q.y]);
+    decorG.poly(flat).fill({ color: b.color, alpha: 0.05 });
+
+    decorG.moveTo(e0[0].x, e0[0].y);
+    for (const q of e0) decorG.lineTo(q.x, q.y);
+    decorG.stroke({ width: 1.5, color: b.color, alpha: 0.28 });
   });
 
   for (let t = 0; t < 10; t++) {
     const r = RING_R0 + t * RING_STEP;
     decorG.ellipse(0, 0, r, r * ISO).stroke({ width: 1, color: 0x6ad8fe, alpha: t % 3 === 2 ? 0.16 : 0.08 });
   }
-  decorG.ellipse(0, 0, wedgeR, wedgeR * ISO).stroke({ width: 2, color: 0x6ad8fe, alpha: 0.2 });
+  decorG.ellipse(0, 0, outer, outer * ISO).stroke({ width: 2, color: 0x6ad8fe, alpha: 0.22 });
+  decorG.ellipse(0, 0, RING_R0 - 34, (RING_R0 - 34) * ISO).stroke({ width: 1, color: 0xeef5fb, alpha: 0.16 });
 
-  // núcleo: laje isométrica
-  const cr = 54;
-  decorG.poly([-cr, 0, 0, cr * ISO, 0, cr * ISO + 14, -cr, 14]).fill(0x0c1428);
-  decorG.poly([cr, 0, 0, cr * ISO, 0, cr * ISO + 14, cr, 14]).fill(0x070d1c);
-  decorG.poly([0, -cr * ISO, cr, 0, 0, cr * ISO, -cr, 0])
-    .fill(0x16203a).stroke({ width: 2, color: 0xeef5fb, alpha: 0.8 });
+  // núcleo: disco isométrico
+  const cr = 42;
+  decorG.ellipse(0, 12, cr, cr * 0.55).fill(0x070d1c);
+  decorG.ellipse(0, 0, cr, cr * 0.55).fill(0x16203a).stroke({ width: 2, color: 0xeef5fb, alpha: 0.8 });
 }
 
 drawMandalaDecor();
 
 BRANCHES.forEach((b, i) => {
   const mid = (branchStart(i) + branchStart(i + 1)) / 2;
-  const p = project(Math.cos(mid) * (R_MAX + 78), Math.sin(mid) * (R_MAX + 78));
-  const label = txt(b.name.toUpperCase(), hex(b.color), 20, true);
+  const r = R_MAX + 66;
+  const p = polar(r, mid + twistAt(r));
+  const label = txt(b.name.toUpperCase(), hex(b.color), 28, true);
   label.anchor.set(0.5);
   label.position.set(p.x, p.y);
   nodeLayer.addChild(label);
 });
 
-const coreLabel = txt('NÚCLEO', '#eef5fb', 12, true);
+const coreLabel = txt('NÚCLEO', '#eef5fb', 10, true);
 coreLabel.anchor.set(0.5);
 coreLabel.position.set(0, 2);
 nodeLayer.addChild(coreLabel);
@@ -841,7 +869,7 @@ function drawNode(s) {
 
   if (state === 'owned') {
     glow.ellipse(0, NODE_S * 0.5, NODE_S * 2, NODE_S * 1.1).fill({ color: base, alpha: 0.22 });
-    drawCube(g, NODE_S, 13, lighten(base, 0.35), base, darken(base, 0.4), 0xffffff, hot ? 1 : 0.75);
+    drawCube(g, NODE_S, 11, lighten(base, 0.35), base, darken(base, 0.4), 0xffffff, hot ? 1 : 0.75);
   } else if (state === 'locked') {
     drawCube(g, NODE_S, 2, 0x1a2540, 0x121b30, 0x0c1324, hot ? 0x6a7a93 : 0x2a3a52, 0.9);
   } else {
@@ -853,7 +881,7 @@ function drawNode(s) {
       hot ? 0xffffff : base, 0.95,
     );
   }
-  cost.position.set(0, -NODE_S / 2 - (state === 'owned' ? 13 : state === 'buyable' ? 6 : 2));
+  cost.position.set(0, -NODE_S / 2 - (state === 'owned' ? 11 : state === 'buyable' ? 6 : 2));
   cost.alpha = state === 'locked' ? 0.35 : 1;
 }
 
@@ -868,6 +896,19 @@ function refreshTree() {
     const on = skillsOwned.has(s.id);
     linkG.moveTo(a.x, a.y).lineTo(b.x, b.y)
       .stroke({ width: on ? 4 : 2, color: on ? BRANCHES[s.branch].color : 0x2a3a52, alpha: on ? 0.85 : 0.7 });
+  }
+  // arco no anel ligando as duas trilhas do mesmo ramo (forma o "rendado" da mandala)
+  for (const s of SKILLS) {
+    if (s.lane !== 0) continue;
+    const mate = SKILLS.find((x) => x.branch === s.branch && x.lane === 1 && x.tier === s.tier);
+    const on = skillsOwned.has(s.id) && skillsOwned.has(mate.id);
+    const n = 8;
+    for (let i = 0; i <= n; i++) {
+      const q = polar(s.r, s.angle + ((mate.angle - s.angle) * i) / n);
+      if (i === 0) linkG.moveTo(q.x, q.y);
+      else linkG.lineTo(q.x, q.y);
+    }
+    linkG.stroke({ width: on ? 3 : 1.5, color: on ? BRANCHES[s.branch].color : 0x2a3a52, alpha: on ? 0.8 : 0.5 });
   }
   for (const s of SKILLS) drawNode(s);
 
@@ -967,17 +1008,35 @@ function layoutTree() {
   treeRespec.position.set(w - 92 - 138 - 32, 15);
   pointsChip.position.set(w - 92 - 138 - 170 - 44, 15);
   legend.position.set(34, h - TREE_FOOT / 2 + 4);
-  hintText.position.set(w - hintText.width - 24, h - TREE_FOOT / 2 - 6);
+  hintText.position.set(24, 38);
+  const by = h - TREE_FOOT + 12;
+  zoomFit.position.set(w - 24 - 108, by);
+  zoomIn.position.set(w - 24 - 108 - 8 - 34, by);
+  zoomOut.position.set(w - 24 - 108 - 8 - 34 - 6 - 34, by);
 }
 
 function resetTreeView() {
   const { w, h } = treeSize;
   const viewH = h - TREE_HEAD - TREE_FOOT;
-  const extentW = (R_MAX + 120) * 2;
-  const extentH = (R_MAX + 120) * 2 * ISO;
+  const extentW = (R_MAX + 100) * 2;
+  const extentH = (R_MAX + 100) * 2 * ISO;
   world.scale.set(Math.min((w - 40) / extentW, (viewH - 10) / extentH));
   world.position.set(w / 2, TREE_HEAD + viewH / 2);
 }
+
+function zoomBy(factor) {
+  const { w, h } = treeSize;
+  const cx = w / 2;
+  const cy = TREE_HEAD + (h - TREE_HEAD - TREE_FOOT) / 2;
+  const old = world.scale.x;
+  const next = Math.min(2.2, Math.max(0.2, old * factor));
+  world.position.set(cx - (cx - world.x) * (next / old), cy - (cy - world.y) * (next / old));
+  world.scale.set(next);
+  tip.visible = false;
+}
+zoomIn.on('pointertap', () => zoomBy(1.25));
+zoomOut.on('pointertap', () => zoomBy(1 / 1.25));
+zoomFit.on('pointertap', () => resetTreeView());
 
 // arrastar para mover
 let drag = null;

@@ -109,30 +109,37 @@ const LANES = [
   },
 ];
 
-// ---- Geração dos 100 nós: mandala com 10 anéis (nível) x 10 raios (5 ramos x 2 trilhas) ----
-export const RING_R0 = 110;      // raio do 1º anel
-export const RING_STEP = 54;     // distância entre anéis
-const SPOKES = LANES.length;     // 10 raios, igualmente espaçados
+// ---- Geração dos 100 nós: mandala com 10 anéis (nível) x 10 braços (5 ramos x 2 trilhas) ----
+// Os braços fazem uma leve espiral: cada anel gira TWIST radianos em relação ao anterior.
+export const RING_R0 = 96;       // raio do 1º anel
+export const RING_STEP = 46;     // distância entre anéis
+export const TWIST = 0.08;       // giro por anel (rad)
+const SPOKES = LANES.length;     // 10 braços, igualmente espaçados
 
 export const spokeAngle = (k) => -Math.PI / 2 + ((k + 0.5) * 2 * Math.PI) / SPOKES;
 export const branchStart = (b) => -Math.PI / 2 + (b * 2 * Math.PI) / BRANCHES.length;
+// giro acumulado até o raio r (0 dentro do 1º anel)
+export const twistAt = (r) => Math.max(0, (r - RING_R0) / RING_STEP) * TWIST;
 
 export const SKILLS = LANES.flatMap((lane, laneIndex) => {
   const branch = Math.floor(laneIndex / 2);
-  const theta = spokeAngle(laneIndex);
 
   return lane.names.map((name, t) => {
     const r = RING_R0 + t * RING_STEP;
+    const angle = spokeAngle(laneIndex) + twistAt(r);
     return {
       id: `${BRANCHES[branch].id}-${laneIndex % 2}-${t}`,
       branch,
+      lane: laneIndex % 2,
       tier: t,
       name,
       desc: lane.desc(t),
       cost: tierCost(t),
       req: t > 0 ? `${BRANCHES[branch].id}-${laneIndex % 2}-${t - 1}` : null,
-      x: Math.cos(theta) * r,   // posição "no chão" (antes da projeção isométrica)
-      y: Math.sin(theta) * r,
+      r,
+      angle,
+      x: Math.cos(angle) * r,   // posição "no chão" (antes da projeção)
+      y: Math.sin(angle) * r,
       apply: (m) => lane.apply(m, t),
     };
   });
