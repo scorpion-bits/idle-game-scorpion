@@ -109,17 +109,20 @@ const LANES = [
   },
 ];
 
-// ---- Geração dos 100 nós, com posição radial para o desenho ----
-const BRANCH_COUNT = BRANCHES.length;
+// ---- Geração dos 100 nós: mandala com 10 anéis (nível) x 10 raios (5 ramos x 2 trilhas) ----
+export const RING_R0 = 110;      // raio do 1º anel
+export const RING_STEP = 54;     // distância entre anéis
+const SPOKES = LANES.length;     // 10 raios, igualmente espaçados
+
+export const spokeAngle = (k) => -Math.PI / 2 + ((k + 0.5) * 2 * Math.PI) / SPOKES;
+export const branchStart = (b) => -Math.PI / 2 + (b * 2 * Math.PI) / BRANCHES.length;
 
 export const SKILLS = LANES.flatMap((lane, laneIndex) => {
   const branch = Math.floor(laneIndex / 2);
-  const side = laneIndex % 2 === 0 ? -1 : 1;
-  const theta = -Math.PI / 2 + (branch * 2 * Math.PI) / BRANCH_COUNT;
+  const theta = spokeAngle(laneIndex);
 
   return lane.names.map((name, t) => {
-    const dist = 130 + t * 74;
-    const off = side * 42;
+    const r = RING_R0 + t * RING_STEP;
     return {
       id: `${BRANCHES[branch].id}-${laneIndex % 2}-${t}`,
       branch,
@@ -128,8 +131,8 @@ export const SKILLS = LANES.flatMap((lane, laneIndex) => {
       desc: lane.desc(t),
       cost: tierCost(t),
       req: t > 0 ? `${BRANCHES[branch].id}-${laneIndex % 2}-${t - 1}` : null,
-      x: Math.cos(theta) * dist - Math.sin(theta) * off,
-      y: Math.sin(theta) * dist + Math.cos(theta) * off,
+      x: Math.cos(theta) * r,   // posição "no chão" (antes da projeção isométrica)
+      y: Math.sin(theta) * r,
       apply: (m) => lane.apply(m, t),
     };
   });

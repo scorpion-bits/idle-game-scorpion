@@ -1,6 +1,11 @@
-import { Application, Assets, Sprite, Text, Container, Graphics, Rectangle } from 'pixi.js';
+import { Application, Assets, Sprite, Container, Graphics, Rectangle } from 'pixi.js';
 import { UPGRADE_DEFS, makeImprovements } from './data.js';
-import { SKILLS, BRANCHES, newMods, computeMods } from './skills.js';
+import {
+  SKILLS, BRANCHES, RING_R0, RING_STEP, spokeAngle, branchStart, newMods, computeMods,
+} from './skills.js';
+import {
+  txt, hex, darken, lighten, drawSlab, makeSlabButton, createScroll, createDock,
+} from './ui.js';
 
 const app = new Application();
 await app.init({ background: '#0b1020', resizeTo: window, antialias: true });
@@ -21,6 +26,7 @@ const GOLDEN_MAX_MS = 120000;
 const GOLDEN_LIFE_MS = 12000;
 const CHIP_DIVISOR = 1e5;            // runBits necessários para o 1º chip
 const BUY_MODES = [1, 10, 100, 'max'];
+const ISO = 0.58;                    // achatamento vertical da projeção isométrica
 
 // ---------- Estado ----------
 let bits = 0;
@@ -35,6 +41,7 @@ let playMs = 0;
 let frenzyLeft = 0;
 let buyMode = 1;
 let resetting = false;
+let savedUi = null;
 
 const unlocked = new Set();     // ids de conquistas
 const bought = new Set();       // ids de melhorias
@@ -49,9 +56,9 @@ const byId = (id) => upgrades.find((u) => u.id === id);
 
 // Impulsos: habilidades ativas com recarga (como em Clicker Heroes / Tap Titans)
 const abilityDefs = [
-  { id: 'rage',      name: 'Fúria',     desc: 'Cliques x10 por 15s',          dur: 15000, cd: 120000 },
-  { id: 'overclock', name: 'Overclock', desc: 'Produção x3 por 20s',          dur: 20000, cd: 180000 },
-  { id: 'sprint',    name: 'Sprint',    desc: '+10 min de produção',        dur: 0,     cd: 300000 },
+  { id: 'rage',      name: 'Fúria',     desc: 'Cliques x10 por 15s',   dur: 15000, cd: 120000 },
+  { id: 'overclock', name: 'Overclock', desc: 'Produção x3 por 20s',   dur: 20000, cd: 180000 },
+  { id: 'sprint',    name: 'Sprint',    desc: '+10 min de produção',   dur: 0,     cd: 300000 },
 ];
 const abilities = Object.fromEntries(abilityDefs.map((a) => [a.id, { act: 0, cd: 0 }]));
 
@@ -151,7 +158,9 @@ function buy(u) {
   bits -= cost;
   u.owned += n;
   const after = levelOf(u);
-  if (after > before) toast(`${u.name} subiu para o nível ${after}! (+${Math.round((LEVEL_BASE_BONUS + mods.levelBonus) * 100)}%)`, '#7ee2a8');
+  if (after > before) {
+    toast(`${u.name} subiu para o nível ${after}! (+${Math.round((LEVEL_BASE_BONUS + mods.levelBonus) * 100)}%)`, '#7ee2a8');
+  }
   updateShop();
   updatePerks();
   save();
@@ -236,6 +245,7 @@ function save() {
       unlocked: [...unlocked],
       skills: [...skillsOwned],
       abilities,
+      ui: { l: leftDock.state(), r: rightDock.state() },
       lastSave: Date.now(),
     }));
   } catch {
@@ -263,6 +273,7 @@ function load() {
     for (const id of d.unlocked ?? []) unlocked.add(id);
     for (const id of d.skills ?? []) if (SKILLS.some((s) => s.id === id)) skillsOwned.add(id);
     recomputeMods();
+    savedUi = d.ui ?? null;
 
     const last = d.lastSave ?? null;
     const away = last ? Date.now() - last : 0;
@@ -281,6 +292,39 @@ function load() {
 
 const lastSave = load();
 
+// ---------- Cenário isométrico: chão em grade e plataforma sob o cubo ----------
+const deco = new Graphics();
+app.stage.addChild(deco);
+
+let decoFrenzy = false;
+
+function drawDeco() {
+  const { width: W, height: H } = app.screen;
+  deco.clear();
+
+  // grade isométrica (linhas com inclinação 2:1)
+  const step = 70;
+  for (let c = -W / 2; c <= H; c += step) deco.moveTo(0, c).lineTo(W, c + W / 2);
+  for (let c = 0; c <= H + W / 2; c += step) deco.moveTo(0, c).lineTo(W, c - W / 2);
+  deco.stroke({ width: 1, color: 0x6ad8fe, alpha: 0.05 });
+
+  // plataforma sob o cubo
+  const cx = W / 2;
+  const cy = H / 2 + 138;
+  const rx = 215;
+  const ry = rx / 2;
+  const t = 16;
+  const edge = decoFrenzy ? 0xffc46b : 0x6ad8fe;
+
+  deco.ellipse(cx, cy + t + 14, rx + 40, ry + 24).fill({ color: edge, alpha: decoFrenzy ? 0.14 : 0.06 });
+  deco.poly([cx - rx, cy, cx, cy + ry, cx, cy + ry + t, cx - rx, cy + t]).fill(0x0c1428);
+  deco.poly([cx + rx, cy, cx, cy + ry, cx, cy + ry + t, cx + rx, cy + t]).fill(0x070d1c);
+  deco.poly([cx, cy - ry, cx + rx, cy, cx, cy + ry, cx - rx, cy])
+    .fill(0x111b38).stroke({ width: 2, color: edge, alpha: 0.55 });
+  deco.poly([cx, cy - ry * 0.62, cx + rx * 0.62, cy, cx, cy + ry * 0.62, cx - rx * 0.62, cy])
+    .stroke({ width: 1, color: edge, alpha: 0.25 });
+}
+
 // ---------- Cubo ----------
 const texture = await Assets.load(`${import.meta.env.BASE_URL}assets/cube.png`);
 const cube = new Sprite(texture);
@@ -291,22 +335,6 @@ cube.scale.set(baseScale);
 cube.eventMode = 'static';
 cube.cursor = 'pointer';
 app.stage.addChild(cube);
-
-// ---------- Helpers de interface ----------
-const FONT = 'Arial';
-const txt = (text, fill, size, bold = false) => new Text({
-  text,
-  style: { fill, fontSize: size, fontFamily: FONT, fontWeight: bold ? 'bold' : 'normal' },
-});
-
-function makeButton(w, h, fill, stroke) {
-  const c = new Container();
-  const bg = new Graphics().roundRect(0, 0, w, h, 10).fill(fill).stroke({ width: 2, color: stroke });
-  c.addChild(bg);
-  c.eventMode = 'static';
-  c.cursor = 'pointer';
-  return c;
-}
 
 // ---------- Textos do topo ----------
 const counter = txt('0 bits', '#eef5fb', 48, true);
@@ -340,122 +368,30 @@ resetBtn.on('pointerdown', () => {
 });
 app.stage.addChild(resetBtn);
 
-// ---------- Coluna rolável com abas (seções) recolhíveis ----------
-const SECTION_HEADER_H = 30;
+// ---------- Gavetas laterais ----------
+const PANEL_W = 318;
+const PAGE_W = PANEL_W - 28;
+const CARD_W = PAGE_W - 14;
+const DEPTH = 4;
 
-function createColumn(width) {
-  const root = new Container();
-  const content = new Container();
-  const maskG = new Graphics();
-  const scrollbar = new Graphics();
-  root.addChild(content, maskG, scrollbar);
-  content.mask = maskG;
+const rightDock = createDock({ side: 'right', panelW: PANEL_W });
+const leftDock = createDock({ side: 'left', panelW: PANEL_W });
+app.stage.addChild(leftDock.root, rightDock.root);
 
-  const col = { root, width, viewH: 300, scrollY: 0, contentH: 0, sections: [] };
-
-  col.addSection = (title) => {
-    const header = new Container();
-    header.addChild(
-      new Graphics()
-        .roundRect(0, 0, width - 12, SECTION_HEADER_H, 10)
-        .fill(0x16203a)
-        .stroke({ width: 1, color: 0x3a4a63 }),
-    );
-    const label = txt('', '#eef5fb', 15, true);
-    label.position.set(12, 6);
-    header.addChild(label);
-    header.eventMode = 'static';
-    header.cursor = 'pointer';
-
-    const body = new Container();
-    content.addChild(header, body);
-
-    const sec = { title, extra: '', collapsed: false, header, body, items: [] };
-    sec.paint = () => {
-      label.text = `${sec.collapsed ? '[+]' : '[-]'} ${sec.title}${sec.extra ? `  ${sec.extra}` : ''}`;
-    };
-    sec.add = (c, h) => {
-      body.addChild(c);
-      sec.items.push({ c, h });
-      return c;
-    };
-    sec.paint();
-    header.on('pointertap', () => {
-      sec.collapsed = !sec.collapsed;
-      sec.paint();
-      col.relayout();
-    });
-    col.sections.push(sec);
-    return sec;
-  };
-
-  col.relayout = () => {
-    let y = 0;
-    for (const sec of col.sections) {
-      sec.header.y = y;
-      y += SECTION_HEADER_H + 6;
-      sec.body.visible = !sec.collapsed;
-      if (!sec.collapsed) {
-        sec.body.y = y;
-        let yy = 0;
-        for (const it of sec.items) {
-          if (!it.c.visible) continue;
-          it.c.y = yy;
-          yy += it.h + 6;
-        }
-        y += yy;
-      }
-      y += 8;
-    }
-    col.contentH = y;
-    col.scrollBy(0);
-  };
-
-  col.scrollBy = (dy) => {
-    const max = Math.max(0, col.contentH - col.viewH);
-    col.scrollY = Math.min(max, Math.max(0, col.scrollY + dy));
-    content.y = -col.scrollY;
-    scrollbar.clear();
-    if (max > 0) {
-      const thumbH = Math.max(30, (col.viewH * col.viewH) / col.contentH);
-      const thumbY = (col.scrollY / max) * (col.viewH - thumbH);
-      scrollbar.roundRect(width - 5, thumbY, 4, thumbH, 2).fill({ color: 0x6ad8fe, alpha: 0.5 });
-    }
-  };
-
-  col.resize = (x, y, viewH) => {
-    root.position.set(x, y);
-    col.viewH = viewH;
-    maskG.clear().rect(0, 0, width, viewH).fill(0xffffff);
-    col.relayout();
-  };
-
-  col.contains = (px, py) =>
-    px >= root.x && px <= root.x + width && py >= root.y && py <= root.y + col.viewH;
-
-  return col;
-}
-
-const COL_W = 280;
-const BTN_W = COL_W - 12;
-const leftCol = createColumn(COL_W);
-const rightCol = createColumn(COL_W);
-app.stage.addChild(leftCol.root, rightCol.root);
-
-// ---------- Seletor de modo de compra (1x / 10x / 100x / Máx) ----------
+// ---- Direita: seletor de modo de compra (x1 / x10 / x100 / Máx) ----
 const modeBar = new Container();
 const modeButtons = BUY_MODES.map((mode, i) => {
-  const btn = makeButton(62, 28, 0x16203a, 0x3a4a63);
-  btn.x = i * 67;
-  const label = txt(mode === 'max' ? 'Máx' : `x${mode}`, '#eef5fb', 15, true);
+  const btn = makeSlabButton(60, 26, 0x16203a, 0x3a4a63, { depth: 3, cut: 6 });
+  btn.x = i * 68;
+  const label = txt(mode === 'max' ? 'Máx' : `x${mode}`, '#eef5fb', 14, true);
   label.anchor.set(0.5);
-  label.position.set(31, 14);
+  label.position.set(30, 13);
   btn.addChild(label);
   btn.on('pointertap', () => setBuyMode(mode));
   modeBar.addChild(btn);
   return { mode, btn };
 });
-app.stage.addChild(modeBar);
+rightDock.setHeader(modeBar, 40);
 
 function setBuyMode(mode) {
   buyMode = mode;
@@ -466,39 +402,41 @@ function setBuyMode(mode) {
 
 function paintModeButtons() {
   for (const { mode, btn } of modeButtons) {
-    btn.getChildAt(0).clear()
-      .roundRect(0, 0, 62, 28, 10)
-      .fill(mode === buyMode ? 0x5b3fc4 : 0x16203a)
-      .stroke({ width: 2, color: mode === buyMode ? 0x8b5cf6 : 0x3a4a63 });
+    const on = mode === buyMode;
+    btn.paint({ face: on ? 0x5b3fc4 : 0x16203a, edge: on ? 0x8b5cf6 : 0x3a4a63 });
   }
 }
 
-// ---------- Seções da direita: Clique e Produção ----------
-const clickSection = rightCol.addSection('Clique');
-const prodSection = rightCol.addSection('Produção');
+// ---- Direita: páginas Clique e Produção ----
+const clickPage = createScroll(PAGE_W);
+const prodPage = createScroll(PAGE_W);
 const shopButtons = [];
 
 for (const u of upgrades) {
-  const BTN_H = 76;
-  const btn = makeButton(BTN_W, BTN_H, 0x1a2440, u.kind === 'click' ? 0x6ad8fe : 0x7ee2a8);
+  const H = 76;
+  const accent = u.kind === 'click' ? 0x6ad8fe : 0x7ee2a8;
+  const btn = makeSlabButton(CARD_W, H, 0x182244, accent, { depth: DEPTH, cut: 9, edgeAlpha: 0.8 });
 
   const title = txt('', '#eef5fb', 17, true);
-  title.position.set(12, 6);
+  title.position.set(14, 7);
   const lvlText = txt('', '#7ee2a8', 13, true);
   lvlText.anchor.set(1, 0);
-  lvlText.position.set(BTN_W - 12, 9);
+  lvlText.position.set(CARD_W - 16, 10);
   const cost = txt('', '#eef5fb', 14);
-  cost.position.set(12, 29);
-  const info = txt('', '#b4c6d7', 13);
-  info.position.set(12, 47);
+  cost.position.set(14, 30);
+  const info = txt('', '#9fb3c8', 13);
+  info.position.set(14, 48);
   const bar = new Graphics();
 
   btn.addChild(title, lvlText, cost, info, bar);
   btn.on('pointertap', () => buy(u));
 
-  (u.kind === 'click' ? clickSection : prodSection).add(btn, BTN_H);
+  (u.kind === 'click' ? clickPage : prodPage).add(btn, H + DEPTH);
   shopButtons.push({ u, btn, title, lvlText, cost, info, bar });
 }
+
+rightDock.addTab('Clique', clickPage, 0x6ad8fe);
+rightDock.addTab('Produção', prodPage, 0x7ee2a8);
 
 function updateShop() {
   for (const { u, btn, title, lvlText, cost, info, bar } of shopButtons) {
@@ -514,32 +452,44 @@ function updateShop() {
 
     // barra de nível: enche a cada unidade, ao completar 10 o upgrade sobe de nível
     const fill = (u.owned % LEVEL_SIZE) / LEVEL_SIZE;
+    const bw = CARD_W - 28;
     bar.clear()
-      .roundRect(12, 66, BTN_W - 24, 5, 2).fill(0x0b1020)
-      .roundRect(12, 66, Math.max(fill > 0 ? 4 : 0, (BTN_W - 24) * fill), 5, 2).fill(0x7ee2a8);
+      .roundRect(14, 66, bw, 5, 2).fill(0x0b1020)
+      .roundRect(14, 66, Math.max(fill > 0 ? 4 : 0, bw * fill), 5, 2).fill(0x7ee2a8);
   }
-  clickSection.extra = '';
-  prodSection.extra = '';
 }
 
-// ---------- Seções da esquerda: Melhorias e Estatísticas ----------
-const perksSection = leftCol.addSection('Melhorias');
+// ---- Esquerda: páginas Melhorias e Estatísticas ----
+const perksPage = createScroll(PAGE_W);
 const perkButtons = [];
 
 for (const imp of improvements) {
-  const BTN_H = 58;
-  const btn = makeButton(BTN_W, BTN_H, 0x1a2440, 0x8b5cf6);
+  const H = 58;
+  const btn = makeSlabButton(CARD_W, H, 0x1b1f45, 0x8b5cf6, { depth: DEPTH, cut: 9, edgeAlpha: 0.8 });
   const title = txt(imp.name, '#eef5fb', 16, true);
-  title.position.set(12, 7);
-  const info = txt(`${imp.desc} · Custo: ${format(imp.cost)}`, '#b4c6d7', 13);
-  info.position.set(12, 32);
+  title.position.set(14, 8);
+  const info = txt(`${imp.desc} · Custo: ${format(imp.cost)}`, '#9fb3c8', 13);
+  info.position.set(14, 33);
   btn.addChild(title, info);
   btn.visible = false;
   btn.on('pointertap', () => buyImprovement(imp));
-  perksSection.add(btn, BTN_H);
+  perksPage.add(btn, H + DEPTH);
   perkButtons.push({ imp, btn });
 }
 
+const perksEmpty = txt('Compre upgrades para liberar\nnovas melhorias.', '#7d94aa', 14);
+perksEmpty.style.lineHeight = 20;
+perksEmpty.position.set(4, 6);
+
+const statsPage = createScroll(PAGE_W);
+const statsText = txt('', '#b4c6d7', 14);
+statsText.style.lineHeight = 22;
+statsPage.add(statsText, 180);
+
+leftDock.addTab('Melhorias', perksPage, 0x8b5cf6);
+leftDock.addTab('Estatísticas', statsPage, 0xffc46b);
+
+const costOfItem = (container) => perkButtons.find(({ btn }) => btn === container).imp.cost;
 let perksSignature = '';
 
 function updatePerks() {
@@ -549,23 +499,14 @@ function updatePerks() {
     btn.visible = show;
     if (show) count++;
   }
-  // ordena por custo: reordena os itens da seção quando o conjunto visível muda
   const signature = perkButtons.map(({ btn }) => (btn.visible ? 1 : 0)).join('');
   if (signature !== perksSignature) {
     perksSignature = signature;
-    perksSection.items.sort((a, b) => costOfItem(a.c) - costOfItem(b.c));
-    leftCol.relayout();
+    perksPage.items.sort((a, b) => costOfItem(a.c) - costOfItem(b.c));
+    perksPage.relayout();
   }
-  perksSection.extra = count ? `(${count})` : '';
-  perksSection.paint();
+  leftDock.setLabel(0, count ? `Melhorias (${count})` : 'Melhorias');
 }
-
-const costOfItem = (container) => perkButtons.find(({ btn }) => btn === container).imp.cost;
-
-const statsSection = leftCol.addSection('Estatísticas');
-const statsText = txt('', '#b4c6d7', 14);
-statsText.style.lineHeight = 20;
-statsSection.add(statsText, 130);
 
 function updateStats() {
   const mins = Math.floor(playMs / 60000);
@@ -575,17 +516,20 @@ function updateStats() {
     `Bits (esta vida): ${format(runBits)}`,
     `Bits (total): ${format(totalBits)}`,
     `Evoluções: ${prestiges}`,
+    `Upgrades comprados: ${totalOwned()}`,
+    `Habilidades: ${skillsOwned.size}/${SKILLS.length}`,
+    `Conquistas: ${unlocked.size}/${achievements.length}`,
     `Tempo de jogo: ${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}min`,
   ].join('\n');
 }
 
 // ---------- Impulsos (habilidades ativas) ----------
 const abilityButtons = abilityDefs.map((a) => {
-  const btn = makeButton(160, 48, 0x1a2440, 0xffc46b);
+  const btn = makeSlabButton(160, 46, 0x2a2410, 0xffc46b, { depth: DEPTH, cut: 9, edgeAlpha: 0.85 });
   const name = txt(a.name, '#eef5fb', 15, true);
-  name.position.set(10, 5);
+  name.position.set(12, 5);
   const status = txt('', '#b4c6d7', 13);
-  status.position.set(10, 26);
+  status.position.set(12, 25);
   btn.addChild(name, status);
   btn.on('pointertap', () => useAbility(a));
   app.stage.addChild(btn);
@@ -633,25 +577,19 @@ function updateAbilities() {
 }
 
 // ---------- Botões de baixo: Conquistas, Habilidades, Evoluir ----------
-const achButton = makeButton(160, 40, 0x2a2410, 0xffc46b);
-const achLabel = txt('', '#ffc46b', 15, true);
-achLabel.anchor.set(0.5);
-achLabel.position.set(80, 20);
-achButton.addChild(achLabel);
+function bottomButton(face, edge, color) {
+  const btn = makeSlabButton(160, 40, face, edge, { depth: DEPTH, cut: 9 });
+  const label = txt('', color, 15, true);
+  label.anchor.set(0.5);
+  label.position.set(80, 20);
+  btn.addChild(label);
+  app.stage.addChild(btn);
+  return { btn, label };
+}
 
-const skillButton = makeButton(160, 40, 0x10253a, 0x6ad8fe);
-const skillLabel = txt('', '#6ad8fe', 15, true);
-skillLabel.anchor.set(0.5);
-skillLabel.position.set(80, 20);
-skillButton.addChild(skillLabel);
-
-const prestigeBtn = makeButton(160, 40, 0x2a1a55, 0x8b5cf6);
-const prestigeLabel = txt('', '#eef5fb', 15, true);
-prestigeLabel.anchor.set(0.5);
-prestigeLabel.position.set(80, 20);
-prestigeBtn.addChild(prestigeLabel);
-
-app.stage.addChild(achButton, skillButton, prestigeBtn);
+const { btn: achButton, label: achLabel } = bottomButton(0x2a2410, 0xffc46b, '#ffc46b');
+const { btn: skillButton, label: skillLabel } = bottomButton(0x10253a, 0x6ad8fe, '#6ad8fe');
+const { btn: prestigeBtn, label: prestigeLabel } = bottomButton(0x2a1a55, 0x8b5cf6, '#eef5fb');
 
 function prestige() {
   const gain = pendingChips();
@@ -691,19 +629,16 @@ const achPanel = new Container();
 achPanel.visible = false;
 achPanel.eventMode = 'static';
 achPanel.cursor = 'pointer';
-achPanel.addChild(
-  new Graphics()
-    .roundRect(0, 0, ACH_W, ACH_H, 16)
-    .fill(0x0f1730)
-    .stroke({ width: 2, color: 0xffc46b }),
-);
+const achBg = new Graphics();
+drawSlab(achBg, ACH_W, ACH_H, { face: 0x0f1730, edge: 0xffc46b, depth: 6, cut: 20 });
+achPanel.addChild(achBg);
 const achTitle = txt('', '#ffc46b', 22, true);
-achTitle.position.set(20, 14);
+achTitle.position.set(24, 16);
 achPanel.addChild(achTitle);
 
 const achRows = achievements.map((a, i) => {
   const row = txt('', '#7d94aa', 14);
-  row.position.set(20 + Math.floor(i / ACH_ROWS) * ACH_COL_W, 56 + (i % ACH_ROWS) * ACH_ROW_H);
+  row.position.set(24 + Math.floor(i / ACH_ROWS) * ACH_COL_W, 58 + (i % ACH_ROWS) * ACH_ROW_H);
   achPanel.addChild(row);
   return { a, row };
 });
@@ -718,10 +653,12 @@ function refreshAchievements() {
   }
 }
 
-// ---------- Árvore de habilidades ----------
-const NODE_R = 20;
-const TREE_HEAD = 56;
-const TREE_FOOT = 64;
+// ---------- Árvore de habilidades: mandala isométrica ----------
+const NODE_S = 17;                         // tamanho do cubo de cada nó
+const TREE_HEAD = 60;
+const TREE_FOOT = 52;
+const R_MAX = RING_R0 + 9 * RING_STEP;
+const HINT = 'Arraste para mover · Roda do mouse: zoom · Clique em um nó brilhante para comprar';
 
 const tree = new Container();
 tree.visible = false;
@@ -731,59 +668,159 @@ const treeBg = new Graphics();
 const treeViewport = new Container();
 const treeMask = new Graphics();
 const world = new Container();
+const decorG = new Graphics();
 const linkG = new Graphics();
 const nodeLayer = new Container();
-world.addChild(linkG, nodeLayer);
+world.addChild(decorG, linkG, nodeLayer);
 treeViewport.addChild(world);
 treeViewport.mask = treeMask;
 
-const treeTitle = txt('', '#eef5fb', 20, true);
-treeTitle.position.set(20, 14);
-const treeClose = txt('[ Fechar ]', '#ffc46b', 16, true);
-treeClose.eventMode = 'static';
-treeClose.cursor = 'pointer';
-const treeRespec = txt('[ Redistribuir pontos ]', '#6ad8fe', 16, true);
-treeRespec.eventMode = 'static';
-treeRespec.cursor = 'pointer';
-const treeInfo = txt('Arraste para mover, role para dar zoom. Clique em um nó disponível para comprar.', '#b4c6d7', 15);
-treeInfo.style.wordWrap = true;
+const treeTitle = txt('Árvore de Habilidades', '#eef5fb', 21, true);
+treeTitle.position.set(22, 16);
 
-tree.addChild(treeBg, treeViewport, treeMask, treeTitle, treeClose, treeRespec, treeInfo);
+const pointsChip = makeSlabButton(170, 30, 0x16203a, 0x6ad8fe, { depth: 3, cut: 7 });
+pointsChip.eventMode = 'none';
+const pointsText = txt('', '#eef5fb', 15, true);
+pointsText.anchor.set(0.5);
+pointsText.position.set(85, 15);
+pointsChip.addChild(pointsText);
 
-// núcleo e nomes dos ramos
-const coreNode = new Graphics().circle(0, 0, 34).fill(0x16203a).stroke({ width: 4, color: 0xeef5fb });
-const coreLabel = txt('Núcleo', '#eef5fb', 14, true);
-coreLabel.anchor.set(0.5);
-nodeLayer.addChild(coreNode, coreLabel);
+const treeRespec = makeSlabButton(138, 30, 0x16203a, 0x3a4a63, { depth: 3, cut: 7 });
+const respecLabel = txt('Redistribuir', '#9fb3c8', 14, true);
+respecLabel.anchor.set(0.5);
+respecLabel.position.set(69, 15);
+treeRespec.addChild(respecLabel);
+
+const treeClose = makeSlabButton(92, 30, 0x2a2410, 0xffc46b, { depth: 3, cut: 7 });
+const closeLabel = txt('Fechar', '#ffc46b', 14, true);
+closeLabel.anchor.set(0.5);
+closeLabel.position.set(46, 15);
+treeClose.addChild(closeLabel);
+
+const legend = new Container();
+const legendItems = BRANCHES.map((b, i) => {
+  const dot = new Graphics();
+  dot.poly([0, -6, 7, -2.5, 0, 1, -7, -2.5]).fill(lighten(b.color, 0.25));
+  dot.poly([-7, -2.5, 0, 1, 0, 9, -7, 5.5]).fill(b.color);
+  dot.poly([7, -2.5, 0, 1, 0, 9, 7, 5.5]).fill(darken(b.color, 0.4));
+  const label = txt('', hex(b.color), 13, true);
+  label.position.set(14, -8);
+  const item = new Container();
+  item.addChild(dot, label);
+  item.x = i * 128;
+  legend.addChild(item);
+  return { b, label };
+});
+
+const hintText = txt(HINT, '#55697d', 12);
+
+// cartão de informações do nó (perto do cubo sob o mouse)
+const tip = new Container();
+tip.visible = false;
+tip.eventMode = 'none';
+const tipBg = new Graphics();
+const tipTag = txt('', '#ffffff', 11, true);
+const tipName = txt('', '#eef5fb', 17, true);
+const tipDesc = txt('', '#b4c6d7', 13);
+tipDesc.style.wordWrap = true;
+tipDesc.style.wordWrapWidth = 232;
+tipDesc.style.lineHeight = 18;
+const tipStatus = txt('', '#6ad8fe', 13, true);
+const tipLine = new Graphics();
+tip.addChild(tipBg, tipLine, tipTag, tipName, tipDesc, tipStatus);
+
+tree.addChild(treeBg, treeViewport, treeMask, treeTitle, pointsChip, treeRespec, treeClose, legend, hintText, tip);
+
+// projeção: plano do chão achatado (isométrico)
+const project = (x, y) => ({ x, y: y * ISO });
+
+function drawCube(g, s, height, top, left, right, edge, edgeAlpha = 0.9) {
+  const k = 0.87 * s;
+  const h = height;
+  g.poly([0, -s - h, k, -s / 2 - h, 0, -h, -k, -s / 2 - h]).fill(top);
+  g.poly([-k, -s / 2 - h, 0, -h, 0, s, -k, s / 2]).fill(left);
+  g.poly([k, -s / 2 - h, 0, -h, 0, s, k, s / 2]).fill(right);
+  g.poly([0, -s - h, k, -s / 2 - h, k, s / 2, 0, s, -k, s / 2, -k, -s / 2 - h])
+    .stroke({ width: 1.4, color: edge, alpha: edgeAlpha });
+}
+
+// decoração fixa da mandala: anéis, raios, setores e núcleo
+function drawMandalaDecor() {
+  decorG.clear();
+  const wedgeR = R_MAX + 46;
+
+  BRANCHES.forEach((b, i) => {
+    const a0 = branchStart(i);
+    const a1 = branchStart(i + 1);
+    const pts = [0, 0];
+    for (let n = 0; n <= 24; n++) {
+      const a = a0 + ((a1 - a0) * n) / 24;
+      const p = project(Math.cos(a) * wedgeR, Math.sin(a) * wedgeR);
+      pts.push(p.x, p.y);
+    }
+    decorG.poly(pts).fill({ color: b.color, alpha: 0.045 });
+    const e = project(Math.cos(a0) * wedgeR, Math.sin(a0) * wedgeR);
+    decorG.moveTo(0, 0).lineTo(e.x, e.y).stroke({ width: 1.5, color: b.color, alpha: 0.22 });
+  });
+
+  for (let t = 0; t < 10; t++) {
+    const r = RING_R0 + t * RING_STEP;
+    decorG.ellipse(0, 0, r, r * ISO).stroke({ width: 1, color: 0x6ad8fe, alpha: t % 3 === 2 ? 0.16 : 0.08 });
+  }
+  decorG.ellipse(0, 0, wedgeR, wedgeR * ISO).stroke({ width: 2, color: 0x6ad8fe, alpha: 0.2 });
+
+  // núcleo: laje isométrica
+  const cr = 54;
+  decorG.poly([-cr, 0, 0, cr * ISO, 0, cr * ISO + 14, -cr, 14]).fill(0x0c1428);
+  decorG.poly([cr, 0, 0, cr * ISO, 0, cr * ISO + 14, cr, 14]).fill(0x070d1c);
+  decorG.poly([0, -cr * ISO, cr, 0, 0, cr * ISO, -cr, 0])
+    .fill(0x16203a).stroke({ width: 2, color: 0xeef5fb, alpha: 0.8 });
+}
+
+drawMandalaDecor();
 
 BRANCHES.forEach((b, i) => {
-  const theta = -Math.PI / 2 + (i * 2 * Math.PI) / BRANCHES.length;
-  const label = txt(b.name, `#${b.color.toString(16).padStart(6, '0')}`, 20, true);
+  const mid = (branchStart(i) + branchStart(i + 1)) / 2;
+  const p = project(Math.cos(mid) * (R_MAX + 78), Math.sin(mid) * (R_MAX + 78));
+  const label = txt(b.name.toUpperCase(), hex(b.color), 20, true);
   label.anchor.set(0.5);
-  label.position.set(Math.cos(theta) * 78, Math.sin(theta) * 78);
+  label.position.set(p.x, p.y);
   nodeLayer.addChild(label);
 });
 
+const coreLabel = txt('NÚCLEO', '#eef5fb', 12, true);
+coreLabel.anchor.set(0.5);
+coreLabel.position.set(0, 2);
+nodeLayer.addChild(coreLabel);
+
+// nós (cubos isométricos), ordenados por profundidade
 const nodeViews = new Map();
 let treeDragMoved = false;
+let hoverId = null;
 
-for (const s of SKILLS) {
+const sortedSkills = [...SKILLS].sort((a, b) => a.y - b.y);
+for (const s of sortedSkills) {
+  const p = project(s.x, s.y);
   const node = new Container();
-  node.position.set(s.x, s.y);
+  node.position.set(p.x, p.y);
+
+  const ring = new Graphics();   // aro pulsante quando dá para comprar
+  ring.ellipse(0, NODE_S * 0.55, NODE_S * 1.5, NODE_S * 0.85).stroke({ width: 2, color: BRANCHES[s.branch].color });
+  ring.visible = false;
+  const glow = new Graphics();
   const g = new Graphics();
-  const cost = txt(String(s.cost), '#eef5fb', 15, true);
+  const cost = txt(String(s.cost), '#eef5fb', 11, true);
   cost.anchor.set(0.5);
-  node.addChild(g, cost);
+  node.addChild(glow, ring, g, cost);
+
   node.eventMode = 'static';
   node.cursor = 'pointer';
+  node.hitArea = new Rectangle(-NODE_S * 0.9, -NODE_S * 1.45, NODE_S * 1.8, NODE_S * 2.3);
   node.on('pointertap', () => { if (!treeDragMoved) buySkill(s); });
-  node.on('pointerover', () => {
-    const state = skillsOwned.has(s.id) ? 'comprada' : `custa ${s.cost} ponto(s)`;
-    treeInfo.text = `${BRANCHES[s.branch].name} · ${s.name} — ${s.desc} (${state})`;
-  });
-  node.on('pointerout', () => { treeInfo.text = 'Arraste para mover, role para dar zoom. Clique em um nó disponível para comprar.'; });
+  node.on('pointerover', () => { hoverId = s.id; drawNode(s); showTip(s); });
+  node.on('pointerout', () => { hoverId = null; drawNode(s); tip.visible = false; });
   nodeLayer.addChild(node);
-  nodeViews.set(s.id, { g, cost });
+  nodeViews.set(s.id, { node, g, glow, ring, cost });
 }
 
 function skillState(s) {
@@ -792,44 +829,114 @@ function skillState(s) {
   return skillPointsFree() >= s.cost ? 'buyable' : 'available';
 }
 
+function drawNode(s) {
+  const { g, glow, ring, cost } = nodeViews.get(s.id);
+  const base = BRANCHES[s.branch].color;
+  const state = skillState(s);
+  const hot = hoverId === s.id;
+  g.clear();
+  glow.clear();
+  ring.visible = state === 'buyable';
+  cost.visible = state !== 'owned';
+
+  if (state === 'owned') {
+    glow.ellipse(0, NODE_S * 0.5, NODE_S * 2, NODE_S * 1.1).fill({ color: base, alpha: 0.22 });
+    drawCube(g, NODE_S, 13, lighten(base, 0.35), base, darken(base, 0.4), 0xffffff, hot ? 1 : 0.75);
+  } else if (state === 'locked') {
+    drawCube(g, NODE_S, 2, 0x1a2540, 0x121b30, 0x0c1324, hot ? 0x6a7a93 : 0x2a3a52, 0.9);
+  } else {
+    const lift = state === 'buyable' ? 6 : 3;
+    const f = state === 'buyable' ? 1 : 0.55;
+    drawCube(
+      g, NODE_S, lift,
+      lighten(darken(base, 1 - f), 0.1), darken(base, 1 - f * 0.75), darken(base, 1 - f * 0.45),
+      hot ? 0xffffff : base, 0.95,
+    );
+  }
+  cost.position.set(0, -NODE_S / 2 - (state === 'owned' ? 13 : state === 'buyable' ? 6 : 2));
+  cost.alpha = state === 'locked' ? 0.35 : 1;
+}
+
 function refreshTree() {
-  treeTitle.text = `Árvore de Habilidades · Pontos livres: ${skillPointsFree()} (nível ${playerLevel()} + ${chips} chips)`;
+  pointsText.text = `Pontos livres: ${skillPointsFree()}`;
 
   linkG.clear();
   for (const s of SKILLS) {
     const from = s.req ? SKILLS.find((x) => x.id === s.req) : { x: 0, y: 0 };
-    const active = skillsOwned.has(s.id);
-    linkG.moveTo(from.x, from.y).lineTo(s.x, s.y)
-      .stroke({ width: active ? 5 : 3, color: active ? BRANCHES[s.branch].color : 0x2a3a52, alpha: active ? 0.9 : 0.8 });
+    const a = project(from.x, from.y);
+    const b = project(s.x, s.y);
+    const on = skillsOwned.has(s.id);
+    linkG.moveTo(a.x, a.y).lineTo(b.x, b.y)
+      .stroke({ width: on ? 4 : 2, color: on ? BRANCHES[s.branch].color : 0x2a3a52, alpha: on ? 0.85 : 0.7 });
+  }
+  for (const s of SKILLS) drawNode(s);
+
+  for (const { b, label } of legendItems) {
+    const mine = SKILLS.filter((s) => s.branch === BRANCHES.indexOf(b));
+    const own = mine.filter((s) => skillsOwned.has(s.id)).length;
+    label.text = `${b.name} ${own}/${mine.length}`;
+  }
+}
+
+function showTip(s) {
+  const base = BRANCHES[s.branch].color;
+  const state = skillState(s);
+  const req = s.req ? SKILLS.find((x) => x.id === s.req) : null;
+
+  tipTag.text = `${BRANCHES[s.branch].name.toUpperCase()} · NÍVEL ${s.tier + 1}/10`;
+  tipTag.style.fill = hex(lighten(base, 0.2));
+  tipName.text = s.name;
+  tipDesc.text = s.desc;
+
+  if (state === 'owned') {
+    tipStatus.text = 'Comprada';
+    tipStatus.style.fill = '#7ee2a8';
+  } else if (state === 'locked') {
+    tipStatus.text = `Requer: ${req.name}`;
+    tipStatus.style.fill = '#ffc46b';
+  } else if (state === 'buyable') {
+    tipStatus.text = `Clique para comprar · ${s.cost} ponto${s.cost > 1 ? 's' : ''}`;
+    tipStatus.style.fill = '#6ad8fe';
+  } else {
+    tipStatus.text = `Faltam ${s.cost - skillPointsFree()} ponto(s) · custa ${s.cost}`;
+    tipStatus.style.fill = '#ff8a8a';
   }
 
-  for (const s of SKILLS) {
-    const { g, cost } = nodeViews.get(s.id);
-    const color = BRANCHES[s.branch].color;
-    const state = skillState(s);
-    g.clear();
-    if (state === 'owned') g.circle(0, 0, NODE_R).fill(color).stroke({ width: 3, color: 0xffffff });
-    else if (state === 'locked') g.circle(0, 0, NODE_R).fill(0x0f1730).stroke({ width: 2, color: 0x3a4a63 });
-    else g.circle(0, 0, NODE_R).fill(0x16203a).stroke({ width: 3, color, alpha: state === 'buyable' ? 1 : 0.5 });
-    cost.visible = state !== 'owned';
-    cost.alpha = state === 'locked' ? 0.4 : 1;
-  }
+  const W = 262;
+  tipTag.position.set(16, 12);
+  tipName.position.set(16, 28);
+  tipDesc.position.set(16, 56);
+  const sepY = 56 + tipDesc.height + 10;
+  tipLine.clear().moveTo(16, sepY).lineTo(W - 16, sepY).stroke({ width: 1, color: 0xffffff, alpha: 0.1 });
+  tipStatus.position.set(16, sepY + 9);
+  const H = sepY + 9 + 18 + 12;
+
+  drawSlab(tipBg, W, H, { face: 0x0c1430, edge: base, depth: 4, cut: 12 });
+  tipBg.rect(0, 12, 4, H - 24).fill(base);
+
+  // posição ao lado do cubo, dentro da área visível
+  const p = project(s.x, s.y);
+  const sx = world.x + p.x * world.scale.x;
+  const sy = world.y + p.y * world.scale.y;
+  const { w, h } = treeSize;
+  let x = sx + 34;
+  if (x + W > w - 12) x = sx - 34 - W;
+  const y = Math.min(h - TREE_FOOT - H - 8, Math.max(TREE_HEAD + 8, sy - H / 2));
+  tip.position.set(x, y);
+  tip.visible = true;
 }
 
 function buySkill(s) {
   const state = skillState(s);
   if (state === 'owned') return;
-  if (state === 'locked') {
-    treeInfo.text = 'Compre primeiro a habilidade anterior da mesma trilha.';
-    return;
-  }
-  if (state === 'available') {
-    treeInfo.text = `Pontos insuficientes: ${s.name} custa ${s.cost}.`;
+  if (state !== 'buyable') {
+    showTip(s);
     return;
   }
   skillsOwned.add(s.id);
   recomputeMods();
   refreshTree();
+  showTip(s);
   updateShop();
   checkAchievements();
   save();
@@ -843,32 +950,33 @@ treeRespec.on('pointertap', () => {
   save();
 });
 
-let treeSize = { w: 800, h: 600 };
+let treeSize = { w: 900, h: 600 };
 
 function layoutTree() {
-  const w = Math.min(1000, app.screen.width - 20);
-  const h = Math.min(700, app.screen.height - 20);
+  const w = Math.min(1180, app.screen.width - 24);
+  const h = Math.min(740, app.screen.height - 24);
   treeSize = { w, h };
   tree.position.set((app.screen.width - w) / 2, (app.screen.height - h) / 2);
   tree.hitArea = new Rectangle(0, 0, w, h);
 
-  treeBg.clear()
-    .roundRect(0, 0, w, h, 16).fill(0x0b1226).stroke({ width: 2, color: 0x6ad8fe })
-    .rect(0, TREE_HEAD, w, h - TREE_HEAD - TREE_FOOT).fill({ color: 0x080d1c });
-  treeMask.clear().rect(0, TREE_HEAD, w, h - TREE_HEAD - TREE_FOOT).fill(0xffffff);
+  drawSlab(treeBg, w, h, { face: 0x0a1124, edge: 0x2c4a66, depth: 6, cut: 24 });
+  treeBg.rect(8, TREE_HEAD, w - 16, h - TREE_HEAD - TREE_FOOT).fill(0x070c1a);
+  treeMask.clear().rect(8, TREE_HEAD, w - 16, h - TREE_HEAD - TREE_FOOT).fill(0xffffff);
 
-  treeClose.position.set(w - treeClose.width - 20, 16);
-  treeRespec.position.set(w - treeClose.width - treeRespec.width - 44, 16);
-  treeInfo.style.wordWrapWidth = w - 40;
-  treeInfo.position.set(20, h - TREE_FOOT + 10);
+  treeClose.position.set(w - 92 - 20, 15);
+  treeRespec.position.set(w - 92 - 138 - 32, 15);
+  pointsChip.position.set(w - 92 - 138 - 170 - 44, 15);
+  legend.position.set(34, h - TREE_FOOT / 2 + 4);
+  hintText.position.set(w - hintText.width - 24, h - TREE_FOOT / 2 - 6);
 }
 
 function resetTreeView() {
   const { w, h } = treeSize;
-  // escala que mostra quase a árvore inteira (as pontas dos ramos ficam para o arrastar/zoom)
   const viewH = h - TREE_HEAD - TREE_FOOT;
-  world.scale.set(Math.min(w, viewH) / 2 / 720);
-  world.position.set(w / 2, TREE_HEAD + viewH / 2 + viewH * 0.06);
+  const extentW = (R_MAX + 120) * 2;
+  const extentH = (R_MAX + 120) * 2 * ISO;
+  world.scale.set(Math.min((w - 40) / extentW, (viewH - 10) / extentH));
+  world.position.set(w / 2, TREE_HEAD + viewH / 2);
 }
 
 // arrastar para mover
@@ -883,7 +991,10 @@ app.stage.on('pointermove', (e) => {
   if (!drag) return;
   const dx = e.global.x - drag.sx;
   const dy = e.global.y - drag.sy;
-  if (Math.abs(dx) + Math.abs(dy) > 5) treeDragMoved = true;
+  if (Math.abs(dx) + Math.abs(dy) > 5) {
+    treeDragMoved = true;
+    tip.visible = false;
+  }
   world.position.set(drag.wx + dx, drag.wy + dy);
 });
 const endDrag = () => { drag = null; };
@@ -894,6 +1005,7 @@ treeClose.on('pointertap', () => toggleTree(false));
 
 function toggleTree(open = !tree.visible) {
   tree.visible = open;
+  tip.visible = false;
   if (open) {
     achPanel.visible = false;
     layoutTree();
@@ -904,7 +1016,10 @@ function toggleTree(open = !tree.visible) {
 
 function toggleAchievements(open = !achPanel.visible) {
   achPanel.visible = open;
-  if (open) tree.visible = false;
+  if (open) {
+    tree.visible = false;
+    tip.visible = false;
+  }
 }
 
 achButton.on('pointertap', () => toggleAchievements());
@@ -924,15 +1039,16 @@ app.canvas.addEventListener('wheel', (e) => {
     const lx = px - tree.x;
     const ly = py - tree.y;
     const old = world.scale.x;
-    const next = Math.min(1.6, Math.max(0.25, old * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
+    const next = Math.min(2.2, Math.max(0.2, old * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
     world.position.set(lx - (lx - world.x) * (next / old), ly - (ly - world.y) * (next / old));
     world.scale.set(next);
+    tip.visible = false;
     return;
   }
-  for (const col of [leftCol, rightCol]) {
-    if (col.contains(px, py)) {
+  for (const dock of [leftDock, rightDock]) {
+    if (dock.hit(px, py)) {
       e.preventDefault();
-      col.scrollBy(e.deltaY);
+      dock.activePage()?.scrollBy(e.deltaY);
       return;
     }
   }
@@ -950,9 +1066,8 @@ function layout() {
   metaText.position.set(width / 2, 100);
   frenzyText.position.set(width / 2, 140);
 
-  leftCol.resize(10, 110, height - 110 - 40);
-  rightCol.resize(Math.max(10, width - COL_W - 10), 148, height - 148 - 12);
-  modeBar.position.set(Math.max(10, width - COL_W - 10), 112);
+  leftDock.layout(width, height, 96);
+  rightDock.layout(width, height, 96);
 
   const row1 = height - 118;
   abilityButtons.forEach(({ btn }, i) => btn.position.set(width / 2 - 250 + i * 170, row1));
@@ -963,6 +1078,7 @@ function layout() {
 
   resetBtn.position.set(16, height - 26);
   achPanel.position.set((width - ACH_W) / 2, Math.max(10, (height - ACH_H) / 2));
+  drawDeco();
   if (tree.visible) layoutTree();
 }
 
@@ -972,10 +1088,7 @@ const particles = [];
 
 function spawnFloatingText(x, y, message, opts = {}) {
   const { fill = '#6ad8fe', size = 32, duration = 800, speed = 0.08, isToast = false } = opts;
-  const text = new Text({
-    text: message,
-    style: { fill, fontSize: size, fontWeight: 'bold', fontFamily: FONT },
-  });
+  const text = txt(message, fill, size, true);
   text.anchor.set(0.5);
   text.position.set(x, y);
   // entra logo abaixo dos painéis, que ficam sempre na frente
@@ -986,7 +1099,7 @@ function spawnFloatingText(x, y, message, opts = {}) {
 // avisos perto do cubo; vários ao mesmo tempo ficam empilhados
 function toast(message, fill = '#ffc46b') {
   const stacked = floaters.filter((f) => f.isToast).length;
-  spawnFloatingText(app.screen.width / 2, app.screen.height / 2 - 200 + stacked * 32, message, {
+  spawnFloatingText(app.screen.width / 2, Math.max(160, app.screen.height / 2 - 190) + stacked * 32, message, {
     fill, size: 24, duration: 3500, speed: 0.01, isToast: true,
   });
 }
@@ -1020,9 +1133,9 @@ function spawnGolden() {
   sprite.tint = 0xffc46b;
   sprite.scale.set(80 / texture.height);
 
-  // evita as colunas de lojas
-  const minX = COL_W + 40;
-  const maxX = Math.max(minX + 1, app.screen.width - COL_W - 40);
+  // evita as gavetas laterais
+  const minX = PANEL_W + 70;
+  const maxX = Math.max(minX + 1, app.screen.width - PANEL_W - 70);
   const minY = 180;
   const maxY = Math.max(minY + 1, app.screen.height - 150);
   sprite.position.set(minX + Math.random() * (maxX - minX), minY + Math.random() * (maxY - minY));
@@ -1071,6 +1184,10 @@ cube.on('pointerdown', (event) => {
 });
 
 // ---------- Estado inicial da interface ----------
+// em telas estreitas as gavetas começam recolhidas para não cobrir o cubo
+const narrow = app.screen.width < 1100;
+rightDock.restore(savedUi?.r ?? { open: !narrow, active: 1 });
+leftDock.restore(savedUi?.l ?? { open: !narrow, active: 0 });
 paintModeButtons();
 updateShop();
 updatePerks();
@@ -1095,12 +1212,16 @@ if (lastSave) {
 // ---------- Game loop ----------
 let slowTimer = 0;
 let achTimer = 0;
+let perksEmptyShown = false;
 
 app.ticker.add((ticker) => {
   const dt = ticker.deltaMS;
   playMs += dt;
 
   earn(getBps() * (dt / 1000));
+
+  leftDock.update(dt);
+  rightDock.update(dt);
 
   // Frenesi e impulsos
   if (frenzyLeft > 0) frenzyLeft = Math.max(0, frenzyLeft - dt);
@@ -1111,6 +1232,10 @@ app.ticker.add((ticker) => {
   frenzyText.text = frenzyLeft > 0
     ? `Frenesi x${frenzyMult()}: ${Math.ceil(frenzyLeft / 1000)}s`
     : '';
+  if ((frenzyLeft > 0) !== decoFrenzy) {
+    decoFrenzy = frenzyLeft > 0;
+    drawDeco();
+  }
 
   // Bit dourado: aparece de tempos em tempos e some se ninguém clicar
   if (golden) {
@@ -1149,6 +1274,13 @@ app.ticker.add((ticker) => {
     updateAbilities();
     if (tree.visible) refreshTree();
 
+    const empty = !perkButtons.some(({ btn }) => btn.visible);
+    if (empty !== perksEmptyShown) {
+      perksEmptyShown = empty;
+      if (empty) perksPage.root.addChild(perksEmpty);
+      else perksPage.root.removeChild(perksEmpty);
+    }
+
     const w = 240;
     const p = Math.min(1, Math.max(0, levelProgress()));
     xpBar.clear()
@@ -1162,6 +1294,12 @@ app.ticker.add((ticker) => {
     for (const { imp, btn } of perkButtons) {
       if (btn.visible) btn.alpha = bits >= imp.cost ? 1 : 0.55;
     }
+  }
+
+  // aros dos nós que dá para comprar pulsam
+  if (tree.visible) {
+    const pulse = 0.45 + 0.45 * Math.sin(performance.now() / 280);
+    for (const { ring } of nodeViews.values()) if (ring.visible) ring.alpha = pulse;
   }
 
   // cubo: volta ao tamanho normal e flutua
@@ -1206,11 +1344,11 @@ document.addEventListener('visibilitychange', () => {
 if (import.meta.env.DEV) {
   window.__idle = {
     earn, spawnGolden, collectGolden, prestige, checkAchievements, pendingChips, setBuyMode,
-    buySkill, toggleTree, useAbility, SKILLS,
-    skillToScreen: (sk) => ({
-      x: tree.x + world.x + sk.x * world.scale.x,
-      y: tree.y + world.y + sk.y * world.scale.y,
-    }),
+    buySkill, toggleTree, useAbility, SKILLS, leftDock, rightDock,
+    skillToScreen: (sk) => {
+      const p = project(sk.x, sk.y);
+      return { x: tree.x + world.x + p.x * world.scale.x, y: tree.y + world.y + p.y * world.scale.y };
+    },
     get state() {
       return {
         bits, runBits, totalBits, clicks, chips, prestiges, frenzyLeft, buyMode,
@@ -1218,6 +1356,7 @@ if (import.meta.env.DEV) {
         unlocked: [...unlocked], bought: [...bought], skills: [...skillsOwned],
         owned: Object.fromEntries(upgrades.map((u) => [u.id, u.owned])),
         bps: getBps(), perClick: getBitsPerClick(), golden: !!golden,
+        docks: { l: leftDock.state(), r: rightDock.state() },
       };
     },
   };
