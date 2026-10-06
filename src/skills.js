@@ -5,11 +5,11 @@ import { UPGRADE_DEFS } from './data.js';
 const GENS = UPGRADE_DEFS.filter((d) => d.kind === 'gen');
 
 export const BRANCHES = [
-  { id: 'click', name: 'Clique',    color: 0x6ad8fe },
-  { id: 'prod',  name: 'Produção',  color: 0x7ee2a8 },
-  { id: 'luck',  name: 'Sorte',     color: 0xffc46b },
-  { id: 'eco',   name: 'Economia',  color: 0x5b6bf5 },
-  { id: 'evo',   name: 'Evolução',  color: 0x8b5cf6 },
+  { id: 'click', name: 'Clique',    color: 0x7cc7ff },
+  { id: 'prod',  name: 'Produção',  color: 0x7bd8a8 },
+  { id: 'luck',  name: 'Sorte',     color: 0xf2c98a },
+  { id: 'eco',   name: 'Economia',  color: 0x8f9bff },
+  { id: 'evo',   name: 'Evolução',  color: 0xb48cff },
 ];
 
 // Todos os efeitos das habilidades somam em um único objeto de "modificadores".
