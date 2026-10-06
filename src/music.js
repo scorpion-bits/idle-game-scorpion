@@ -2,8 +2,7 @@
 // Usa o mesmo contexto de áudio dos efeitos; o volume e o liga/desliga vêm das configurações.
 import { settings } from './settings.js';
 import { getAudioContext } from './sfx.js';
-
-const URL = `${import.meta.env.BASE_URL}assets/idle-song.mp3`;
+import SONG_URL from './assets/idle-song.mp3';   // o Vite copia o arquivo e devolve a URL final
 const MAX_GAIN = 0.45;   // a música nunca passa disso, para não cobrir os efeitos
 
 let buffer = null;
@@ -16,7 +15,7 @@ const level = () => (settings.music ? settings.musicVolume * MAX_GAIN : 0);
 function load(ctx) {
   if (buffer) return Promise.resolve(buffer);
   if (!loading) {
-    loading = fetch(URL)
+    loading = fetch(SONG_URL)
       .then((r) => r.arrayBuffer())
       .then((data) => ctx.decodeAudioData(data))
       .then((b) => { buffer = b; return b; })

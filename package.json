@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:site": "vite build --mode site",
+    "publish:site": "node scripts/publish-site.mjs"
   },
   "dependencies": {
     "pixi.js": "^8.22.0"

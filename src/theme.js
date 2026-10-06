@@ -1,6 +1,9 @@
 // Tema visual: paleta fria e dessaturada, com poucos acentos suaves.
 
-export const FONT = '"Segoe UI", Inter, system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif';
+// As fontes "Grotesk" (títulos) e "Body" (texto) são as do site; fora dele caem para as do sistema.
+export const FONT_DISPLAY = '"Grotesk", "Segoe UI", system-ui, sans-serif';
+export const FONT_BODY = '"Body", "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif';
+export const FONT = FONT_BODY;
 
 const channel = (c, shift) => (c >> shift) & 0xff;
 const pack = (r, g, b) => (Math.round(r) << 16) | (Math.round(g) << 8) | Math.round(b);
@@ -16,24 +19,26 @@ export function lighten(color, f) {
 
 export const hex = (color) => `#${color.toString(16).padStart(6, '0')}`;
 
+// Cores: os mesmos tokens do site (ink-*, cyan, mint, amber, indigo, violet), um pouco
+// clareados nos tons escuros para manter contraste sobre os painéis.
 export const C = {
-  bg: 0x0a0f1e,
-  panel: 0x111832,       // gavetas e janelas
-  card: 0x172042,        // cartões
-  deep: 0x070b18,        // áreas mais fundas
-  text: 0xe8eefc,
-  dim: 0x93a3c4,
-  faint: 0x5d6c8e,
+  bg: 0x080e16,
+  panel: 0x0c141f,       // gavetas e janelas
+  card: 0x111c2a,        // cartões
+  deep: 0x05090f,        // áreas mais fundas
+  text: 0xeef5fb,
+  dim: 0x9db2c6,
+  faint: 0x55697d,
 
-  accent: 0x8ab4ff,      // azul suave
-  click: 0x7cc7ff,
-  prod: 0x7bd8a8,
-  luck: 0xf2c98a,
-  eco: 0x8f9bff,
-  evo: 0xb48cff,
-  good: 0x7bd8a8,
-  warn: 0xf2c98a,
-  bad: 0xf08a8a,
+  accent: 0x6ad8fe,      // ciano da marca
+  click: 0x6ad8fe,
+  prod: 0x7ee2a8,
+  luck: 0xffc46b,
+  eco: 0x7c8bf8,
+  evo: 0xa57bf8,
+  good: 0x7ee2a8,
+  warn: 0xffc46b,
+  bad: 0xff8a8a,
 };
 
 export const T = {

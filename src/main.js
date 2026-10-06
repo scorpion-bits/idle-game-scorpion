@@ -11,9 +11,15 @@ import { settings, setSetting, onSettingsChange } from './settings.js';
 import { sfx, unlockAudio, applyVolume, haptic } from './sfx.js';
 import { startMusic, stopMusic, updateMusicVolume, musicState } from './music.js';
 
+// as fontes do site precisam estar prontas antes de criar qualquer texto no Pixi
+await Promise.all([
+  document.fonts?.load('600 16px "Grotesk"'),
+  document.fonts?.load('400 14px "Body"'),
+]).catch(() => {});
+
 const app = new Application();
 await app.init({
-  background: '#0a0f1e',
+  background: '#080e16',
   resizeTo: window,
   antialias: true,
   resolution: Math.min(window.devicePixelRatio || 1, 2.5),
@@ -345,7 +351,7 @@ function drawBackground() {
   // brilho suave atrás do cubo (camadas translúcidas formam um degradê)
   for (let i = 0; i < 10; i++) {
     const k = 1 - i / 10;
-    bgG.ellipse(W / 2, cubeBaseY, W * 0.62 * k + 80, H * 0.55 * k + 80).fill({ color: 0x24357f, alpha: 0.018 });
+    bgG.ellipse(W / 2, cubeBaseY, W * 0.62 * k + 80, H * 0.55 * k + 80).fill({ color: 0x1c4a68, alpha: 0.018 });
   }
   // grade isométrica quase invisível
   const step = 72;
@@ -367,8 +373,8 @@ function drawPedestal() {
 
   pedestal.clear();
   pedestal.ellipse(cx, cy + t + 12, rx * 1.12, ry * 1.18).fill({ color: 0x000000, alpha: 0.3 });
-  pedestal.ellipse(cx, cy + t, rx, ry).fill(0x0c1226);
-  pedestal.ellipse(cx, cy, rx, ry).fill(0x131c3a).stroke({ width: 1.5, color: rim, alpha: 0.3 });
+  pedestal.ellipse(cx, cy + t, rx, ry).fill(0x070d14);
+  pedestal.ellipse(cx, cy, rx, ry).fill(0x0f1a28).stroke({ width: 1.5, color: rim, alpha: 0.3 });
   pedestal.ellipse(cx, cy, rx * 0.74, ry * 0.74).stroke({ width: 1, color: rim, alpha: 0.1 });
   pedestal.ellipse(cx, cy, rx * 0.46, ry * 0.46).stroke({ width: 1, color: rim, alpha: 0.07 });
   refreshCache(pedestal);
@@ -436,7 +442,8 @@ function updateRipples(dt) {
 }
 
 // ---------- Cubo ----------
-const texture = await Assets.load(`${import.meta.env.BASE_URL}assets/cube.png`);
+const CUBE_URL = import.meta.env.VITE_CUBE_URL || `${import.meta.env.BASE_URL}assets/cube.png`;
+const texture = await Assets.load(CUBE_URL);
 const cube = new Sprite(texture);
 cube.anchor.set(0.5);
 
@@ -677,14 +684,14 @@ function useAbility(a) {
   if (a.id === 'sprint') {
     const gain = getBps() * 600;
     if (gain < 1) {
-      toast('Você precisa de produção para usar o Sprint', '#f08a8a');
+      toast('Você precisa de produção para usar o Sprint', '#ff8a8a');
       return;
     }
     earn(gain);
-    toast(`Sprint! +${format(gain)} bits`, '#f2c98a');
+    toast(`Sprint! +${format(gain)} bits`, '#ffc46b');
   } else {
     s.act = a.dur;
-    toast(`${a.name} ativada`, '#f2c98a');
+    toast(`${a.name} ativada`, '#ffc46b');
   }
   s.cd = a.cd * mods.abilityCd;
   abilityUses++;
@@ -746,7 +753,7 @@ const { btn: prestigeBtn, label: prestigeLabel } = bottomButton(C.evo, T.text);
 function prestige() {
   const gain = pendingChips();
   if (gain < 1) {
-    toast('Ainda não dá para evoluir: ganhe mais bits', '#f08a8a');
+    toast('Ainda não dá para evoluir: ganhe mais bits', '#ff8a8a');
     return;
   }
   const ok = confirm(
@@ -766,7 +773,7 @@ function prestige() {
   updateShop();
   updatePerks();
   addRipple(2);
-  toast(`Evolução! +${gain} chip(s)`, '#b48cff');
+  toast(`Evolução! +${gain} chip(s)`, '#a57bf8');
   checkAchievements();
   save();
 }
@@ -781,9 +788,10 @@ dim.on('pointertap', () => closeModals());
 
 function showModal(panel) {
   const { width: W, height: H } = app.screen;
-  dim.clear().rect(0, 0, W, H).fill(0x04070f);
+  dim.clear().rect(0, 0, W, H).fill(0x03060b);
   dim.visible = true;
   sfx.open();
+  document.body.classList.add('modal-open');
   tween(dim, { alpha: 0.62 }, 260);
   const y = panel.y;
   panel.visible = true;
@@ -794,6 +802,7 @@ function showModal(panel) {
 
 function hideModal(panel) {
   sfx.close();
+  document.body.classList.remove('modal-open');
   tween(dim, { alpha: 0 }, 220, { onDone: () => { if (!tree.visible && !achPanel.visible && !settingsPanel.visible) dim.visible = false; } });
   const y = panel.y;
   tween(panel, { alpha: 0, y: y + 12 }, 220, {
@@ -1026,8 +1035,8 @@ function drawMandalaDecor() {
 
   // núcleo: disco suave
   const cr = 42;
-  decorG.ellipse(0, 10, cr, cr * 0.55).fill(0x070b18);
-  decorG.ellipse(0, 0, cr, cr * 0.55).fill(0x172042).stroke({ width: 1.5, color: 0xffffff, alpha: 0.35 });
+  decorG.ellipse(0, 10, cr, cr * 0.55).fill(0x05090f);
+  decorG.ellipse(0, 0, cr, cr * 0.55).fill(0x111c2a).stroke({ width: 1.5, color: 0xffffff, alpha: 0.35 });
 }
 
 drawMandalaDecor();
@@ -1138,7 +1147,7 @@ function drawNode(s) {
     glow.ellipse(0, NODE_S * 0.5, NODE_S * 2, NODE_S * 1.1).fill({ color: base, alpha: 0.2 });
     drawCube(g, NODE_S, 11, lighten(base, 0.3), base, darken(base, 0.38), 0xffffff, hot ? 0.9 : 0.45);
   } else if (state === 'locked') {
-    drawCube(g, NODE_S, 2, 0x1a2342, 0x131a33, 0x0e1428, hot ? 0x7d8db0 : 0x2b3860, 0.9);
+    drawCube(g, NODE_S, 2, 0x14202e, 0x0f1823, 0x0b121b, hot ? 0x8aa0b8 : 0x2a3b4e, 0.9);
   } else {
     const lift = state === 'buyable' ? 6 : 3;
     const f = state === 'buyable' ? 1 : 0.55;
@@ -1173,7 +1182,7 @@ function refreshTree() {
     const b = project(s.x, s.y);
     const on = skillsOwned.has(s.id);
     linkG.moveTo(a.x, a.y).lineTo(b.x, b.y)
-      .stroke({ width: on ? 3 : 1.5, color: on ? BRANCHES[s.branch].color : 0x2b3860, alpha: on ? 0.8 : 0.55 });
+      .stroke({ width: on ? 3 : 1.5, color: on ? BRANCHES[s.branch].color : 0x2a3b4e, alpha: on ? 0.8 : 0.55 });
   }
   // arco no anel ligando as duas trilhas do mesmo ramo (forma o "rendado" da mandala)
   for (const s of SKILLS) {
@@ -1186,7 +1195,7 @@ function refreshTree() {
       if (i === 0) linkG.moveTo(q.x, q.y);
       else linkG.lineTo(q.x, q.y);
     }
-    linkG.stroke({ width: on ? 2.5 : 1.2, color: on ? BRANCHES[s.branch].color : 0x2b3860, alpha: on ? 0.7 : 0.4 });
+    linkG.stroke({ width: on ? 2.5 : 1.2, color: on ? BRANCHES[s.branch].color : 0x2a3b4e, alpha: on ? 0.7 : 0.4 });
   }
   for (const s of SKILLS) drawNode(s);
 
@@ -1695,13 +1704,13 @@ function toggleSettings(open = !settingsPanel.visible) {
 // botão de engrenagem (canto superior direito); gira ao passar o mouse
 const gearBtn = makeButton(36, 36, { tint: C.accent, radius: 18, alpha: 0.06 });
 const gearIcon = new Graphics();
-gearIcon.circle(0, 0, 7.5).stroke({ width: 3, color: 0xe8eefc, alpha: 0.9 });
+gearIcon.circle(0, 0, 7.5).stroke({ width: 3, color: 0xeef5fb, alpha: 0.9 });
 for (let i = 0; i < 8; i++) {
   const a = (i * Math.PI) / 4;
   gearIcon.moveTo(Math.cos(a) * 8.5, Math.sin(a) * 8.5).lineTo(Math.cos(a) * 12, Math.sin(a) * 12);
 }
-gearIcon.stroke({ width: 3.2, color: 0xe8eefc, alpha: 0.9 });
-gearIcon.circle(0, 0, 2.5).fill({ color: 0xe8eefc, alpha: 0.9 });
+gearIcon.stroke({ width: 3.2, color: 0xeef5fb, alpha: 0.9 });
+gearIcon.circle(0, 0, 2.5).fill({ color: 0xeef5fb, alpha: 0.9 });
 gearIcon.position.set(18, 18);
 gearBtn.addChild(gearIcon);
 gearBtn.on('pointerover', () => tween(gearIcon, { rotation: Math.PI / 2 }, 600));
@@ -1721,7 +1730,7 @@ toastLayer.eventMode = 'none';
 app.stage.addChild(toastLayer);
 const toasts = [];
 
-function toast(message, fill = '#f2c98a') {
+function toast(message, fill = '#ffc46b') {
   const dotColor = parseInt(fill.slice(1), 16);
   const size = layoutMode === 'desktop' ? 14 : 13;
   const label = txt(message, T.text, size, true);
@@ -1944,7 +1953,7 @@ function layout() {
   drawHalo();
   if (achPanel.visible) layoutAch();
   if (tree.visible) layoutTree();
-  if (dim.visible) dim.clear().rect(0, 0, width, height).fill(0x04070f);
+  if (dim.visible) dim.clear().rect(0, 0, width, height).fill(0x03060b);
 }
 
 // com pouca largura só uma gaveta pode ficar aberta (senão uma cobre a outra)
@@ -2043,11 +2052,11 @@ function collectGolden() {
   if (Math.random() < 0.5) {
     sfx.boost();
     frenzyLeft = FRENZY_MS * mods.frenzyDur;
-    toast(`Frenesi! Produção x${frenzyMult()} por ${Math.round(frenzyLeft / 1000)}s`, '#f2c98a');
+    toast(`Frenesi! Produção x${frenzyMult()} por ${Math.round(frenzyLeft / 1000)}s`, '#ffc46b');
   } else {
     const gain = (Math.min(bits * 0.15, getBps() * 900) + 13) * mods.luckyMult;
     earn(gain);
-    toast(`Sorte! +${format(gain)} bits`, '#f2c98a');
+    toast(`Sorte! +${format(gain)} bits`, '#ffc46b');
   }
   spawnParticles(golden.sprite.x, golden.sprite.y);
   addRipple(1.6);
@@ -2115,6 +2124,13 @@ function intro() {
 }
 intro();
 
+// tela de carregamento da página do site (ver vite.config.js): some com fade
+const boot = document.getElementById('boot');
+if (boot) {
+  boot.classList.add('done');
+  setTimeout(() => boot.remove(), 800);
+}
+
 // ---------- Progresso offline ----------
 if (lastSave) {
   const capS = (BASE_OFFLINE_H + mods.offlineH) * 3600;
@@ -2122,7 +2138,7 @@ if (lastSave) {
   const gain = getBps() * elapsed;
   if (gain >= 1) {
     earn(gain);
-    toast(`Bem-vindo de volta! +${format(gain)} bits`, '#f2c98a');
+    toast(`Bem-vindo de volta! +${format(gain)} bits`, '#ffc46b');
   }
 }
 

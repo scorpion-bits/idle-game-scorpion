@@ -1,14 +1,14 @@
 // Componentes de interface (Pixi): cartões suaves, botões com micro-interações,
 // listas roláveis com entrada em cascata e gavetas laterais com abas.
 import { Container, Graphics, Text, Rectangle } from 'pixi.js';
-import { C, FONT } from './theme.js';
+import { C, FONT_BODY, FONT_DISPLAY } from './theme.js';
 import { tween, ease } from './anim.js';
 
 export { C, T, hex, darken, lighten } from './theme.js';
 
 export const txt = (text, fill, size, bold = false) => new Text({
   text,
-  style: { fill, fontSize: size, fontFamily: FONT, fontWeight: bold ? '600' : '400' },
+  style: { fill, fontSize: size, fontFamily: bold ? FONT_DISPLAY : FONT_BODY, fontWeight: bold ? '600' : '400' },
 });
 
 // Cartão arredondado com sombra suave e borda quase invisível.
