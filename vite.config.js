@@ -6,14 +6,26 @@ import { fileURLToPath } from 'node:url';
 //  - ganha título, SEO, fontes, tela de carregamento e botão "voltar ao site".
 const SITE_ORIGIN = 'https://scorpionbits.com';
 
-const siteHtml = () => ({
-  name: 'site-html',
+// Caminhos que mudam entre as duas versões da página:
+//  - site: vive em scorpionbits.com/jogo/, usa os arquivos de ../assets/ do próprio site e o Pixi dele;
+//  - standalone: página do repositório (scorpionbits.com/idle-game-scorpion/), autossuficiente:
+//    fontes, logo e Pixi vão junto no build. O canonical aponta para /jogo/ para não duplicar no Google.
+const VARIANTS = {
+  site: { sharedPixi: true, fonts: '../assets/fonts', glyph: '../assets/logo-glyph.png', icon: '../assets/favicon.png', home: '../' },
+  standalone: { sharedPixi: false, fonts: './fonts', glyph: './logo-glyph.png', icon: './favicon.png', home: `${SITE_ORIGIN}/` },
+};
+
+const pageShell = (variant) => ({
+  name: 'page-shell',
   transformIndexHtml(html) {
+    const v = VARIANTS[variant];
     return {
       html: html.replace(/<title>.*?<\/title>/, '<title>Idle Bits — jogue no navegador</title>'),
       tags: [
         // `defer`: a tela de carregamento aparece enquanto o Pixi baixa; roda antes do módulo do jogo
-        { tag: 'script', attrs: { src: '../assets/vendor/pixi.min.js?v=8.22.0', defer: true }, injectTo: 'head-prepend' },
+        ...(v.sharedPixi
+          ? [{ tag: 'script', attrs: { src: '../assets/vendor/pixi.min.js?v=8.22.0', defer: true }, injectTo: 'head-prepend' }]
+          : []),
         { tag: 'meta', attrs: { name: 'theme-color', content: '#05090f' }, injectTo: 'head' },
         { tag: 'meta', attrs: { name: 'description', content: 'Idle Bits: um clicker isométrico que roda no navegador. Clique no cubo, monte seu estúdio, evolua e explore uma árvore com 100 habilidades.' }, injectTo: 'head' },
         { tag: 'link', attrs: { rel: 'canonical', href: `${SITE_ORIGIN}/jogo/` }, injectTo: 'head' },
@@ -24,16 +36,16 @@ const siteHtml = () => ({
         { tag: 'meta', attrs: { property: 'og:image', content: `${SITE_ORIGIN}/assets/projetos/idle.webp` }, injectTo: 'head' },
         { tag: 'meta', attrs: { property: 'og:locale', content: 'pt_BR' }, injectTo: 'head' },
         { tag: 'meta', attrs: { name: 'twitter:card', content: 'summary_large_image' }, injectTo: 'head' },
-        { tag: 'link', attrs: { rel: 'icon', href: '../assets/favicon.png', type: 'image/png' }, injectTo: 'head' },
-        { tag: 'link', attrs: { rel: 'apple-touch-icon', href: '../assets/favicon.png' }, injectTo: 'head' },
-        { tag: 'link', attrs: { rel: 'preload', as: 'font', type: 'font/woff2', href: '../assets/fonts/grotesk-latin.woff2', crossorigin: '' }, injectTo: 'head' },
-        { tag: 'link', attrs: { rel: 'preload', as: 'font', type: 'font/woff2', href: '../assets/fonts/inter-latin.woff2', crossorigin: '' }, injectTo: 'head' },
+        { tag: 'link', attrs: { rel: 'icon', href: v.icon, type: 'image/png' }, injectTo: 'head' },
+        { tag: 'link', attrs: { rel: 'apple-touch-icon', href: v.icon }, injectTo: 'head' },
+        { tag: 'link', attrs: { rel: 'preload', as: 'font', type: 'font/woff2', href: `${v.fonts}/grotesk-latin.woff2`, crossorigin: '' }, injectTo: 'head' },
+        { tag: 'link', attrs: { rel: 'preload', as: 'font', type: 'font/woff2', href: `${v.fonts}/inter-latin.woff2`, crossorigin: '' }, injectTo: 'head' },
         {
           tag: 'style',
           injectTo: 'head',
           children: `
-@font-face { font-family: "Grotesk"; src: url("../assets/fonts/grotesk-latin.woff2") format("woff2"); font-weight: 300 700; font-display: swap; }
-@font-face { font-family: "Body"; src: url("../assets/fonts/inter-latin.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
+@font-face { font-family: "Grotesk"; src: url("${v.fonts}/grotesk-latin.woff2") format("woff2"); font-weight: 300 700; font-display: swap; }
+@font-face { font-family: "Body"; src: url("${v.fonts}/inter-latin.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
 html, body { background: #080e16; }
 
 /* botão "voltar ao site" (canto superior esquerdo, par da engrenagem) */
@@ -63,14 +75,14 @@ html, body { background: #080e16; }
           tag: 'div',
           attrs: { id: 'boot', role: 'status' },
           injectTo: 'body-prepend',
-          children: `<img src="../assets/logo-glyph.png" width="56" height="68" alt="">
+          children: `<img src="${v.glyph}" width="56" height="68" alt="">
 <p id="boot-txt">Carregando o jogo…</p>
-<p id="boot-msg">Está demorando? Tente recarregar a página ou abrir em outro navegador. <a href="../">Voltar ao site</a></p>
-<noscript><p>Este jogo precisa de JavaScript. <a href="../">Voltar ao site</a></p></noscript>`,
+<p id="boot-msg">Está demorando? Tente recarregar a página ou abrir em outro navegador. <a href="${v.home}">Voltar ao site</a></p>
+<noscript><p>Este jogo precisa de JavaScript. <a href="${v.home}">Voltar ao site</a></p></noscript>`,
         },
         {
           tag: 'a',
-          attrs: { class: 'back', href: '../', 'aria-label': 'Voltar ao site da Scorpion Bits', title: 'Voltar ao site' },
+          attrs: { class: 'back', href: v.home, 'aria-label': 'Voltar ao site da Scorpion Bits', title: 'Voltar ao site' },
           injectTo: 'body-prepend',
           children: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>',
         },
@@ -88,11 +100,10 @@ export default defineConfig(({ mode }) => {
   const site = mode === 'site';
   return {
     base: './',
-    title: undefined,
     resolve: site
       ? { alias: { 'pixi.js': fileURLToPath(new URL('./src/pixi-global.js', import.meta.url)) } }
       : {},
-    plugins: site ? [siteHtml()] : [],
+    plugins: [pageShell(site ? 'site' : 'standalone')],
     // no site o cubo vem de assets/ do próprio site, então não copia a pasta public
     publicDir: site ? false : 'public',
     build: { outDir: site ? 'dist-site' : 'dist' },
