@@ -10,6 +10,18 @@ npm install
 npm run dev          # http://localhost:5173
 ```
 
+## Publicação: duas versões
+
+| Onde | Endereço | Como |
+| --- | --- | --- |
+| **Página do repositório** | <https://scorpionbits.com/idle-game-scorpion/> | Automático: o fluxo `.github/workflows/pages.yml` compila (`npm run build`) e publica a cada push na `main`. |
+| **Dentro do site** | <https://scorpionbits.com/jogo/> | Manual: `npm run publish:site` (veja abaixo). Usa o Pixi e as fontes do próprio site. |
+
+Para a primeira vez (só uma vez): **Settings → Pages → Build and deployment → Source = "GitHub Actions"**.
+Acompanhe o andamento na aba **Actions**. O Pages só publica a partir da `main`, então é preciso
+mesclar a branch de trabalho antes. A versão da página do repositório é autossuficiente (Pixi,
+fontes e música vão no build); o `canonical` dela aponta para `/jogo/`, para o Google não indexar duas cópias.
+
 ## Como o jogo entra no site
 
 O site (`scorpion-bits.github.io`) é HTML estático, sem build. Por isso o jogo é compilado aqui e o
