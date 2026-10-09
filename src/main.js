@@ -1,4 +1,4 @@
-import { Application, Assets, Sprite, Container, Graphics, Rectangle } from 'pixi.js';
+import { Application, Assets, Sprite, Container, Graphics, Rectangle, ColorMatrixFilter } from 'pixi.js';
 import { UPGRADE_DEFS, makeImprovements } from './data.js';
 import {
   SKILLS, BRANCHES, RING_R0, RING_STEP, spokeAngle, branchStart, twistAt, newMods, computeMods,
@@ -9,6 +9,11 @@ import {
 import { tween, ease, updateTweens, cancelTweens } from './anim.js';
 import { settings, setSetting, onSettingsChange } from './settings.js';
 import { sfx, unlockAudio, applyVolume, haptic } from './sfx.js';
+import {
+  CHALLENGES, CHALLENGE_MIN_LEVEL, RESEARCH, PROJECTS, MANAGERS, MANAGER_SPEND, SKINS, MARKET,
+  ASCEND_MIN_CHIPS, ascendGain, coreMult, computeFx, makeMissions, dayKey, pickMarketEvent, fmtTime,
+  MISSION_TYPES,
+} from './features.js';
 import { startMusic, stopMusic, updateMusicVolume, musicState } from './music.js';
 
 // as fontes do site precisam estar prontas antes de criar qualquer texto no Pixi
@@ -60,6 +65,25 @@ let chips = 0;
 let prestiges = 0;
 let prestigeSP = 0;   // pontos de habilidade vindos de evoluções (no máx. MAX_SP_PER_PRESTIGE cada)
 let migrationNote = null;
+// ---- Estúdio: mecânicas extras (ver features.js) ----
+let fragments = 0;        // moeda dos bits dourados e missões (compra visuais)
+let cores = 0;            // núcleos da Ascensão
+let ascensions = 0;
+let missionsClaimed = 0;
+const research = { done: new Set(), active: null };
+let projects = {};        // id -> { state: 'running' | 'done', endsAt }
+const managers = { hired: new Set(), off: new Set(), master: true };
+let skinId = 'padrao';
+const skinsOwned = new Set(['padrao']);
+let challenge = null;
+const challengesDone = new Set();
+let daily = { date: '', counters: {}, missions: [] };
+let fx = { prod: 1, click: 1, cost: 1, offlineH: 0, golden: 1, frenzyDur: 1, lucky: 1 };
+const market = { kind: null, mult: 1, endsAt: 0, label: '', nextAt: Date.now() + 240000 };
+let proposal = null;
+const combo = { meter: 0, last: 0 };
+const skinDef = () => SKINS.find((k) => k.id === skinId) ?? SKINS[0];
+const accentNow = () => skinDef().rim;
 let abilityUses = 0;
 let playMs = 0;
 let frenzyLeft = 0;
@@ -119,7 +143,7 @@ function baseBps() {
 const frenzyMult = () => FRENZY_MULT + mods.frenzyAdd;
 
 function getBps() {
-  return baseBps() * globalMult() * mods.prodMult
+  return baseBps() * globalMult() * mods.prodMult * fx.prod * marketMult()
     * (frenzyLeft > 0 ? frenzyMult() : 1)
     * (abilities.overclock.act > 0 ? 3 : 1);
 }
@@ -128,7 +152,8 @@ function getBitsPerClick() {
   let flat = 1;
   for (const u of clickUpgrades) flat += u.owned * u.click * unitMult(u);
   const base = flat * mods.clickMult + baseBps() * mods.clickBps;
-  return base * globalMult() * (abilities.rage.act > 0 ? 10 : 1);
+  if (ruleId() === 'nocl') return 0;
+  return base * globalMult() * fx.click * comboMult() * (abilities.rage.act > 0 ? 10 : 1);
 }
 
 const totalOwned = () => upgrades.reduce((sum, u) => sum + u.owned, 0);
@@ -141,6 +166,8 @@ function earn(amount) {
   bits += amount;
   totalBits += amount;
   runBits += amount;
+  if (challenge) challenge.bits += amount;
+  daily.counters.earn = (daily.counters.earn ?? 0) + amount;
 }
 
 function format(n) {
@@ -158,7 +185,7 @@ function format(n) {
 const rate = (x) => (x < 1000 ? String(+x.toFixed(1)) : format(x));
 
 // ---- custo e modos de compra (1x, 10x, 100x, Máx) ----
-const unitCost = (u) => u.baseCost * mods.costMult * GROWTH ** u.owned;
+const unitCost = (u) => u.baseCost * mods.costMult * fx.cost * (ruleId() === 'cost2' ? 2 : 1) * GROWTH ** u.owned;
 const costFor = (u, n) => Math.ceil((unitCost(u) * (GROWTH ** n - 1)) / (GROWTH - 1));
 
 function maxAffordable(u) {
@@ -181,6 +208,11 @@ function planBuy(u) {
 }
 
 function buy(u) {
+  if (!challengeAllows(u)) {
+    toast('Desafio: limite de 3 tipos de upgrade', '#ff8a8a');
+    sfx.deny();
+    return;
+  }
   const { n, cost, ok } = planBuy(u);
   if (!ok) {
     sfx.deny();
@@ -190,6 +222,7 @@ function buy(u) {
   const before = levelOf(u);
   bits -= cost;
   u.owned += n;
+  trackDaily('buy', n);
   const after = levelOf(u);
   if (after > before) {
     sfx.levelUp();
@@ -202,6 +235,11 @@ function buy(u) {
 
 function buyImprovement(imp) {
   if (bought.has(imp.id)) return;
+  if (ruleId() === 'noimp') {
+    toast('Desafio: melhorias bloqueadas', '#ff8a8a');
+    sfx.deny();
+    return;
+  }
   if (bits < imp.cost) {
     sfx.deny();
     return;
@@ -259,6 +297,15 @@ const achievements = [
   { id: 'sk10',   name: 'Aprendiz',               desc: 'Compre 10 habilidades',     test: () => skillsOwned.size >= 10 },
   { id: 'sk50',   name: 'Mestre das árvores',     desc: 'Compre 50 habilidades',     test: () => skillsOwned.size >= 50 },
   { id: 'ab1',    name: 'Hora do impulso',        desc: 'Use um impulso',            test: () => abilityUses >= 1 },
+  { id: 'ch1',    name: 'Regras novas',           desc: 'Vença um desafio',          test: () => challengesDone.size >= 1 },
+  { id: 'ch6',    name: 'Sem desculpas',          desc: 'Vença todos os desafios',   test: () => challengesDone.size >= CHALLENGES.length },
+  { id: 'rs1',    name: 'Laboratório',            desc: 'Conclua uma pesquisa',      test: () => research.done.size >= 1 },
+  { id: 'rs6',    name: 'Centro de pesquisa',     desc: 'Conclua 6 pesquisas',       test: () => research.done.size >= 6 },
+  { id: 'pj1',    name: 'Lançamento!',            desc: 'Lance um jogo',             test: () => projectsDone().size >= 1 },
+  { id: 'pj5',    name: 'Catálogo completo',      desc: 'Lance os 5 jogos',          test: () => projectsDone().size >= PROJECTS.length },
+  { id: 'mg1',    name: 'Chefe',                  desc: 'Contrate um gerente',       test: () => managers.hired.size >= 1 },
+  { id: 'mi3',    name: 'Rotina em dia',          desc: 'Cumpra 3 missões diárias',  test: () => missionsClaimed >= 3 },
+  { id: 'as1',    name: 'Ascensão',               desc: 'Ascenda pela primeira vez', test: () => ascensions >= 1 },
 ];
 
 function checkAchievements() {
@@ -273,6 +320,389 @@ function checkAchievements() {
   }
 }
 
+// ---------- Mecânicas do Estúdio (lógica) ----------
+// Desafios, pesquisa, projetos, gerentes, missões, mercado, combo, visuais e ascensão.
+// A interface delas fica na janela "Estúdio" (mais abaixo); aqui só estado e regras.
+const challengeRule = () => (challenge ? CHALLENGES.find((c) => c.id === challenge.id) : null);
+const ruleId = () => challenge?.id ?? null;
+
+const projectsDone = () => new Set(Object.keys(projects).filter((id) => projects[id].state === 'done'));
+
+function recomputeFx() {
+  fx = computeFx({
+    researchDone: research.done,
+    projectsDone: projectsDone(),
+    challengesDone,
+    cores,
+  });
+}
+
+const marketMult = () => (market.endsAt > Date.now() ? market.mult : 1);
+const comboMult = () => 1 + combo.meter / 100;
+
+function trackDaily(type, n = 1) {
+  daily.counters[type] = (daily.counters[type] ?? 0) + n;
+}
+
+const freshCounters = () => ({ clicks: 0, golden: 0, buy: 0, earn: 0, impulse: 0, research: 0, combo: 0 });
+
+function ensureDaily() {
+  const key = dayKey();
+  if (daily.date === key) return;
+  daily = { date: key, counters: freshCounters(), missions: makeMissions(key, getBps()) };
+}
+
+// ---- Desafios ----
+function challengeAllows(u) {
+  if (ruleId() === 'three' && u.kind === 'gen' && u.owned === 0 && genUpgrades.filter((g) => g.owned > 0).length >= 3) {
+    return false;
+  }
+  return true;
+}
+
+function startChallenge(id) {
+  const def = CHALLENGES.find((c) => c.id === id);
+  if (!def || challenge) return;
+  if (playerLevel() < CHALLENGE_MIN_LEVEL) {
+    toast(`Desafios liberam no nível ${CHALLENGE_MIN_LEVEL}`, '#ff8a8a');
+    sfx.deny();
+    return;
+  }
+  const ok = confirm(
+    `Iniciar "${def.name}"?\n\n${def.rule}\nMeta: juntar ${format(def.goal)} bits.` +
+    `${def.limitS ? `\nTempo: ${Math.round(def.limitS / 60)} minutos.` : ''}\n\n` +
+    'Sua corrida atual fica guardada e volta quando o desafio terminar.',
+  );
+  if (!ok) return;
+
+  challenge = {
+    id,
+    bits: 0,
+    startedAt: Date.now(),
+    snapshot: {
+      bits, runBits,
+      owned: Object.fromEntries(upgrades.map((u) => [u.id, u.owned])),
+      bought: [...bought],
+    },
+  };
+  bits = 0;
+  runBits = 0;
+  for (const u of upgrades) u.owned = 0;
+  bought.clear();
+  frenzyLeft = 0;
+  market.endsAt = 0;
+  proposal = null;
+  sfx.boost();
+  toast(`Desafio: ${def.name}`, '#ffc46b');
+  updateShop();
+  updatePerks();
+  save();
+}
+
+function endChallenge(success, why = '') {
+  if (!challenge) return;
+  const def = challengeRule();
+  const snap = challenge.snapshot;
+  bits = snap.bits;
+  runBits = snap.runBits;
+  for (const u of upgrades) u.owned = snap.owned[u.id] ?? 0;
+  bought.clear();
+  for (const id of snap.bought) bought.add(id);
+  challenge = null;
+  if (success) {
+    challengesDone.add(def.id);
+    recomputeFx();
+    sfx.achievement();
+    toast(`Desafio concluído: ${def.name} (+${Math.round(def.reward * 100)}% de produção)`, '#7ee2a8');
+  } else {
+    sfx.deny();
+    toast(`Desafio encerrado${why ? `: ${why}` : ''}`, '#ff8a8a');
+  }
+  updateShop();
+  updatePerks();
+  checkAchievements();
+  save();
+}
+
+function tickChallenge() {
+  if (!challenge) return;
+  const def = challengeRule();
+  if (challenge.bits >= def.goal) endChallenge(true);
+  else if (def.limitS && (Date.now() - challenge.startedAt) / 1000 > def.limitS) endChallenge(false, 'o tempo acabou');
+}
+
+// ---- Pesquisa (um projeto por vez, em tempo real) ----
+function startResearch(id) {
+  const r = RESEARCH.find((x) => x.id === id);
+  if (!r || research.active || research.done.has(id)) return;
+  if (bits < r.cost) {
+    sfx.deny();
+    return;
+  }
+  bits -= r.cost;
+  research.active = { id, endsAt: Date.now() + r.time * 1000 };
+  sfx.buy();
+  toast(`Pesquisa iniciada: ${r.name}`, '#6ad8fe');
+  save();
+}
+
+function tickResearch() {
+  if (!research.active || Date.now() < research.active.endsAt) return;
+  const r = RESEARCH.find((x) => x.id === research.active.id);
+  research.done.add(r.id);
+  research.active = null;
+  recomputeFx();
+  trackDaily('research');
+  sfx.levelUp();
+  toast(`Pesquisa concluída: ${r.name} (${r.desc})`, '#7ee2a8');
+  checkAchievements();
+  save();
+}
+
+// ---- Projetos: lançar um jogo ----
+function startProject(id) {
+  const p = PROJECTS.find((x) => x.id === id);
+  if (!p || projects[id]) return;
+  if (bits < p.cost) {
+    sfx.deny();
+    return;
+  }
+  bits -= p.cost;
+  projects[id] = { state: 'running', endsAt: Date.now() + p.time * 1000 };
+  sfx.buy();
+  toast(`Produção iniciada: ${p.name}`, '#6ad8fe');
+  save();
+}
+
+function tickProjects() {
+  for (const p of PROJECTS) {
+    const st = projects[p.id];
+    if (!st || st.state !== 'running' || Date.now() < st.endsAt) continue;
+    st.state = 'done';
+    recomputeFx();
+    sfx.achievement();
+    toast(`${p.name} foi lançado! Produção +${Math.round(p.mult * 100)}%`, '#7ee2a8');
+    checkAchievements();
+    save();
+  }
+}
+
+// ---- Gerentes ----
+function hireManager(id) {
+  const m = MANAGERS.find((x) => x.id === id);
+  if (!m || managers.hired.has(id)) return;
+  if (playerLevel() < m.level || bits < m.cost) {
+    sfx.deny();
+    return;
+  }
+  bits -= m.cost;
+  managers.hired.add(id);
+  sfx.buy();
+  toast(`${m.name} contratado`, '#7ee2a8');
+  checkAchievements();
+  save();
+}
+
+// compra uma unidade sem barulho (usado pelos gerentes)
+function buyQuiet(u) {
+  if (!challengeAllows(u)) return false;
+  const c = costFor(u, 1);
+  if (c > bits * MANAGER_SPEND) return false;
+  bits -= c;
+  u.owned += 1;
+  trackDaily('buy');
+  return true;
+}
+
+function tickManagers() {
+  if (!managers.master) return;
+  let bought1 = false;
+  for (const m of MANAGERS) {
+    if (!managers.hired.has(m.id) || managers.off.has(m.id)) continue;
+    const u = byId(m.id);
+    for (let i = 0; i < 10 && buyQuiet(u); i++) bought1 = true;
+  }
+  if (bought1) updateShop();
+}
+
+// ---- Missões diárias ----
+const missionProgress = (m) => Math.min(m.target, daily.counters[m.type] ?? 0);
+
+function claimMission(i) {
+  const m = daily.missions[i];
+  if (!m || m.claimed || missionProgress(m) < m.target) return;
+  m.claimed = true;
+  const gift = Math.max(1000, getBps() * 600);
+  earn(gift);
+  fragments += 2;
+  daily.claimedTotal = (daily.claimedTotal ?? 0) + 1;
+  missionsClaimed++;
+  sfx.achievement();
+  toast(`Missão cumprida! +${format(gift)} bits e +2 fragmentos`, '#ffc46b');
+  checkAchievements();
+  save();
+}
+
+// ---- Eventos de mercado ----
+function openProposal(kind) {
+  const expiresAt = Date.now() + MARKET.proposalS * 1000;
+  if (kind === 'crash') {
+    const pct = Math.round((1 - MARKET.crash.mult) * 100);
+    proposal = {
+      kind, title: 'Crise no mercado', expiresAt, fallback: 'b',
+      text: `Se nada for feito, os bits/s caem ${pct}% por ${MARKET.crash.durS}s. Um seguro custa ${Math.round(MARKET.crash.insurance * 100)}% dos seus bits.`,
+      a: { label: 'Pagar seguro', run: () => { bits -= bits * MARKET.crash.insurance; toast('Seguro pago: a crise passou batido', '#7ee2a8'); } },
+      b: { label: 'Enfrentar', run: () => { setMarket('crash', MARKET.crash.mult, MARKET.crash.durS, `Crise: bits/s −${pct}%`); toast(`Crise! Bits/s −${pct}% por ${MARKET.crash.durS}s`, '#ff8a8a'); sfx.deny(); } },
+    };
+  } else if (kind === 'invest') {
+    proposal = {
+      kind, title: 'Proposta de investidor', expiresAt, fallback: 'b',
+      text: `Invista ${Math.round(MARKET.invest.share * 100)}% dos seus bits: ${Math.round(MARKET.invest.winChance * 100)}% de chance de receber o dobro de volta.`,
+      a: {
+        label: 'Investir',
+        run: () => {
+          const stake = bits * MARKET.invest.share;
+          if (stake < 1) { toast('Poucos bits para investir', '#ff8a8a'); return; }
+          bits -= stake;
+          if (Math.random() < MARKET.invest.winChance) {
+            earn(stake * MARKET.invest.payout);
+            sfx.goldenCollect();
+            toast(`Deu certo! O investimento rendeu ${format(stake * MARKET.invest.payout)} bits`, '#7ee2a8');
+          } else {
+            sfx.deny();
+            toast(`O investimento deu errado: −${format(stake)} bits`, '#ff8a8a');
+          }
+        },
+      },
+      b: { label: 'Recusar', run: () => {} },
+    };
+  } else {
+    proposal = {
+      kind: 'fan', title: 'Fã generoso', expiresAt, fallback: 'a',
+      text: 'Um fã quer retribuir o carinho. Escolha o presente.',
+      a: { label: `${MARKET.fan.minutesOfProduction} min de bits`, run: () => { const g = Math.max(1000, getBps() * 60 * MARKET.fan.minutesOfProduction); earn(g); sfx.goldenCollect(); toast(`Presente: +${format(g)} bits`, '#ffc46b'); } },
+      b: { label: `${MARKET.fan.fragments} fragmentos`, run: () => { fragments += MARKET.fan.fragments; sfx.goldenCollect(); toast(`Presente: +${MARKET.fan.fragments} fragmentos`, '#ffc46b'); } },
+    };
+  }
+  sfx.goldenSpawn();
+}
+
+function setMarket(kind, mult, durS, label) {
+  market.kind = kind;
+  market.mult = mult;
+  market.endsAt = Date.now() + durS * 1000;
+  market.label = label;
+}
+
+function resolveProposal(choice) {
+  if (!proposal) return;
+  const p = proposal;
+  proposal = null;
+  (choice === 'a' ? p.a : p.b).run();
+  updateShop();
+  save();
+}
+
+function scheduleMarket() {
+  market.nextAt = Date.now() + (MARKET.minGapS + Math.random() * (MARKET.maxGapS - MARKET.minGapS)) * 1000;
+}
+
+function tickMarket() {
+  const now = Date.now();
+  if (market.endsAt && now >= market.endsAt) {
+    market.endsAt = 0;
+    market.kind = null;
+    market.mult = 1;
+    toast('O mercado voltou ao normal', '#9db2c6');
+  }
+  if (proposal && now >= proposal.expiresAt) resolveProposal(proposal.fallback);
+  if (challenge || proposal || market.endsAt || playerLevel() < 6 || now < market.nextAt) return;
+  scheduleMarket();
+  const kind = pickMarketEvent();
+  if (kind === 'boom') {
+    const pct = Math.round((MARKET.boom.mult - 1) * 100);
+    setMarket('boom', MARKET.boom.mult, MARKET.boom.durS, `Boom de mercado: bits/s +${pct}%`);
+    sfx.boost();
+    toast(`Boom de mercado! Bits/s +${pct}% por ${MARKET.boom.durS}s`, '#7ee2a8');
+  } else {
+    openProposal(kind);
+  }
+}
+
+// ---- Combo de cliques ----
+function comboClick() {
+  combo.last = performance.now();
+  const was = combo.meter;
+  combo.meter = Math.min(100, combo.meter + 7);
+  if (was < 100 && combo.meter >= 100) trackDaily('combo', 1);
+}
+
+function tickCombo(dt) {
+  if (combo.meter > 0 && performance.now() - combo.last > 650) {
+    combo.meter = Math.max(0, combo.meter - 28 * (dt / 1000));
+  }
+}
+
+// ---- Ascensão: a segunda camada de evolução ----
+function ascend() {
+  const gain = ascendGain(chips);
+  if (challenge) {
+    toast('Termine o desafio antes de ascender', '#ff8a8a');
+    sfx.deny();
+    return;
+  }
+  if (chips < ASCEND_MIN_CHIPS || gain < 1) {
+    toast(`Ascensão libera com ${ASCEND_MIN_CHIPS} chips`, '#ff8a8a');
+    sfx.deny();
+    return;
+  }
+  const next = cores + gain;
+  const ok = confirm(
+    `Ascender agora?\n\nVocê troca seus ${chips} chips por ${gain} núcleo(s).\n` +
+    `Bônus de produção: ×${coreMult(cores).toFixed(2)} → ×${coreMult(next).toFixed(2)}, permanente.\n\n` +
+    'Reinicia: bits, upgrades, melhorias e chips. Ficam: habilidades e pontos, conquistas, pesquisa, projetos, desafios, gerentes e visuais.',
+  );
+  if (!ok) return;
+
+  sfx.prestige();
+  haptic(40);
+  cores = next;
+  ascensions++;
+  chips = 0;
+  bits = 0;
+  runBits = 0;
+  for (const u of upgrades) u.owned = 0;
+  bought.clear();
+  recomputeFx();
+  updateShop();
+  updatePerks();
+  toast(`Ascensão! +${gain} núcleo(s)`, '#a57bf8');
+  checkAchievements();
+  save();
+}
+
+// ---- Visuais ----
+const skinUnlocked = (s) => skinsOwned.has(s.id) || (s.project && projectsDone().has(s.project));
+
+function buyOrEquipSkin(id) {
+  const s = SKINS.find((x) => x.id === id);
+  if (!s) return;
+  if (!skinUnlocked(s)) {
+    if (fragments < s.cost) {
+      sfx.deny();
+      return;
+    }
+    fragments -= s.cost;
+    skinsOwned.add(id);
+    sfx.achievement();
+  }
+  skinId = id;
+  sfx.tick();
+  applySkin();
+  save();
+}
+
+
 // ---------- Save / Load ----------
 const num = (v) => (Number.isFinite(v) ? v : 0);
 
@@ -285,6 +715,14 @@ function save() {
       unlocked: [...unlocked],
       skills: [...skillsOwned],
       abilities,
+      fragments, cores, ascensions, missionsClaimed,
+      research: { done: [...research.done], active: research.active },
+      projects,
+      managers: { hired: [...managers.hired], off: [...managers.off], master: managers.master },
+      skin: { id: skinId, owned: [...skinsOwned] },
+      challenge,
+      challengesDone: [...challengesDone],
+      daily,
       ui: { l: leftDock.state(), r: rightDock.state() },
       lastSave: Date.now(),
     }));
@@ -317,6 +755,22 @@ function load() {
     for (const id of d.unlocked ?? []) unlocked.add(id);
     for (const id of d.skills ?? []) if (SKILLS.some((s) => s.id === id)) skillsOwned.add(id);
     recomputeMods();
+    fragments = num(d.fragments);
+    cores = num(d.cores);
+    ascensions = num(d.ascensions);
+    missionsClaimed = num(d.missionsClaimed);
+    for (const id of d.research?.done ?? []) if (RESEARCH.some((r) => r.id === id)) research.done.add(id);
+    if (d.research?.active && RESEARCH.some((r) => r.id === d.research.active.id)) research.active = d.research.active;
+    for (const p of PROJECTS) if (d.projects?.[p.id]) projects[p.id] = d.projects[p.id];
+    for (const id of d.managers?.hired ?? []) if (MANAGERS.some((m) => m.id === id)) managers.hired.add(id);
+    for (const id of d.managers?.off ?? []) managers.off.add(id);
+    managers.master = d.managers?.master !== false;
+    for (const id of d.skin?.owned ?? []) if (SKINS.some((k) => k.id === id)) skinsOwned.add(id);
+    if (SKINS.some((k) => k.id === d.skin?.id)) skinId = d.skin.id;
+    if (d.challenge && CHALLENGES.some((c) => c.id === d.challenge.id) && d.challenge.snapshot) challenge = d.challenge;
+    for (const id of d.challengesDone ?? []) if (CHALLENGES.some((c) => c.id === id)) challengesDone.add(id);
+    if (d.daily?.date) daily = d.daily;
+    recomputeFx();
     // se o jogador tinha gasto mais pontos do que agora tem direito, devolve todos (ele refaz a árvore)
     if (skillPointsSpent() > skillPointsTotal()) {
       skillsOwned.clear();
@@ -341,6 +795,7 @@ function load() {
 }
 
 const lastSave = load();
+ensureDaily();
 
 // ---------- Cenário: fundo suave, partículas flutuantes e pedestal ----------
 
@@ -388,7 +843,7 @@ function drawPedestal() {
   const rx = cubeSize * 0.74;
   const ry = rx * 0.5;
   const t = Math.max(7, cubeSize * 0.045);
-  const rim = decoFrenzy ? C.warn : C.accent;
+  const rim = decoFrenzy ? C.warn : accentNow();
   ped = { cx, cy, rx };
 
   pedestal.clear();
@@ -401,7 +856,7 @@ function drawPedestal() {
 }
 
 function drawHalo() {
-  const color = decoFrenzy ? C.warn : C.accent;
+  const color = decoFrenzy ? C.warn : accentNow();
   halo.clear();
   for (let i = 1; i <= 8; i++) {
     halo.circle(0, 0, cubeSize * (0.28 + i * 0.075)).fill({ color, alpha: 0.012 });
@@ -427,7 +882,7 @@ function updateMotes(dt) {
   const { width: W, height: H } = app.screen;
   const mul = frenzyLeft > 0 ? 2.4 : 1;
   const now = performance.now();
-  const tint = frenzyLeft > 0 ? C.warn : C.accent;
+  const tint = frenzyLeft > 0 ? C.warn : accentNow();
   for (const m of motesData) {
     m.y -= (m.v * mul * dt) / 1000 / H;
     if (m.y < -0.02) {
@@ -457,7 +912,7 @@ function updateRipples(dt) {
     }
     const k = 0.3 + 0.85 * ease.out(p);
     ripples.ellipse(ped.cx, ped.cy, ped.rx * k, ped.rx * k * 0.5)
-      .stroke({ width: 2, color: decoFrenzy ? C.warn : C.accent, alpha: (1 - p) * 0.35 * r.s });
+      .stroke({ width: 2, color: decoFrenzy ? C.warn : accentNow(), alpha: (1 - p) * 0.35 * r.s });
   }
 }
 
@@ -672,7 +1127,10 @@ function updateStats() {
     `Bits dourados: ${goldenClicks}`,
     `Bits (esta vida): ${format(runBits)}`,
     `Bits (total): ${format(totalBits)}`,
-    `Evoluções: ${prestiges}`,
+    `Evoluções: ${prestiges} · Ascensões: ${ascensions}`,
+    `Núcleos: ${cores} · Fragmentos: ${fragments}`,
+    `Desafios: ${challengesDone.size}/${CHALLENGES.length} · Pesquisas: ${research.done.size}/${RESEARCH.length}`,
+    `Jogos lançados: ${projectsDone().size}/${PROJECTS.length} · Missões: ${missionsClaimed}`,
     `Upgrades comprados: ${totalOwned()}`,
     `Habilidades: ${skillsOwned.size}/${SKILLS.length}`,
     `Conquistas: ${unlocked.size}/${achievements.length}`,
@@ -696,6 +1154,11 @@ const abilityButtons = abilityDefs.map((a) => {
 
 function useAbility(a) {
   const s = abilities[a.id];
+  if (ruleId() === 'nogold') {
+    toast('Desafio: impulsos bloqueados', '#ff8a8a');
+    sfx.deny();
+    return;
+  }
   if (s.cd > 0) {
     sfx.deny();
     return;
@@ -715,6 +1178,7 @@ function useAbility(a) {
   }
   s.cd = a.cd * mods.abilityCd;
   abilityUses++;
+  trackDaily('impulse');
   addRipple(1.4);
   checkAchievements();
   save();
@@ -771,6 +1235,11 @@ const { btn: skillButton, label: skillLabel } = bottomButton(C.accent, T.accent)
 const { btn: prestigeBtn, label: prestigeLabel } = bottomButton(C.evo, T.text);
 
 function prestige() {
+  if (challenge) {
+    toast('Termine o desafio antes de evoluir', '#ff8a8a');
+    sfx.deny();
+    return;
+  }
   const gain = pendingChips();
   if (gain < 1) {
     toast('Ainda não dá para evoluir: ganhe mais bits', '#ff8a8a');
@@ -828,7 +1297,7 @@ function showModal(panel) {
 function hideModal(panel) {
   sfx.close();
   document.body.classList.remove('modal-open');
-  tween(dim, { alpha: 0 }, 220, { onDone: () => { if (!tree.visible && !achPanel.visible && !settingsPanel.visible) dim.visible = false; } });
+  tween(dim, { alpha: 0 }, 220, { onDone: () => { if (!tree.visible && !achPanel.visible && !settingsPanel.visible && !studioPanel.visible) dim.visible = false; } });
   const y = panel.y;
   tween(panel, { alpha: 0, y: y + 12 }, 220, {
     onDone: () => {
@@ -842,6 +1311,7 @@ function closeModals() {
   if (tree.visible) toggleTree(false);
   if (achPanel.visible) toggleAchievements(false);
   if (settingsPanel.visible) toggleSettings(false);
+  if (studioPanel.visible) toggleStudio(false);
 }
 
 // ---------- Painel de conquistas (rolável; 2 colunas em telas largas) ----------
@@ -1531,6 +2001,10 @@ function toggleTree(open = !tree.visible) {
       cancelTweens(settingsPanel);
       settingsPanel.visible = false;
     }
+    if (studioPanel.visible) {
+      cancelTweens(studioPanel);
+      studioPanel.visible = false;
+    }
     cancelTweens(tree);
     tree.alpha = 1;
     layoutTree();
@@ -1551,6 +2025,10 @@ function toggleAchievements(open = !achPanel.visible) {
     if (settingsPanel.visible) {
       cancelTweens(settingsPanel);
       settingsPanel.visible = false;
+    }
+    if (studioPanel.visible) {
+      cancelTweens(studioPanel);
+      studioPanel.visible = false;
     }
     cancelTweens(achPanel);
     layoutAch();
@@ -1718,6 +2196,10 @@ function toggleSettings(open = !settingsPanel.visible) {
       cancelTweens(achPanel);
       achPanel.visible = false;
     }
+    if (studioPanel.visible) {
+      cancelTweens(studioPanel);
+      studioPanel.visible = false;
+    }
     cancelTweens(settingsPanel);
     layoutSettings();
     showModal(settingsPanel);
@@ -1747,7 +2229,527 @@ onSettingsChange((key) => {
   if (key === 'sound' || key === 'volume') applyVolume();
 });
 
-app.stage.addChild(dim, achPanel, tree, settingsPanel);
+// ---------- Estúdio: janela com as mecânicas extras ----------
+const STUDIO_TABS = ['Desafios', 'Pesquisa', 'Jogos', 'Missões', 'Mercado', 'Gerentes', 'Visuais', 'Ascensão'];
+const stIndex = Object.fromEntries(STUDIO_TABS.map((n, i) => [n, i]));
+let studioTab = 0;
+let stW = 520;
+
+const studioPanel = new Container();
+studioPanel.visible = false;
+studioPanel.eventMode = 'static';
+const stBg = new Graphics();
+const stTitle = txt('Estúdio', T.text, 19, true);
+const stClose = labeledButton(84, 30, 'Fechar', C.warn, T.warn, 13);
+const stInfo = txt('', T.dim, 12);
+stInfo.style.wordWrap = true;
+stInfo.eventMode = 'none';
+const stScroll = createScroll(460);
+const stPills = STUDIO_TABS.map((name, i) => {
+  const b = labeledButton(100, 28, name, C.accent, T.dim, 12, 0.05);
+  b.on('pointertap', () => { if (!uiMoved) setStudioTab(i); });
+  return b;
+});
+studioPanel.addChild(stBg, stTitle, stClose, ...stPills, stInfo, stScroll.root);
+stClose.on('pointertap', () => toggleStudio(false));
+
+const studioRows = [];
+
+// cada linha: { get() -> {title, sub, right, rc, p, accent, dim, on}, tap() }
+function addStudioRow(tab, spec) {
+  const c = new Container();
+  const bg = new Graphics();
+  const bar = new Graphics();
+  const title = txt('', T.text, 14, true);
+  title.position.set(16, 9);
+  const sub = txt('', T.dim, 11.5);
+  sub.style.wordWrap = true;
+  sub.position.set(16, 29);
+  const right = txt('', T.accent, 13, true);
+  right.anchor.set(1, 0);
+  c.addChild(bg, bar, title, sub, right);
+  c.eventMode = 'static';
+  c.cursor = 'pointer';
+  c.on('pointertap', () => {
+    if (uiMoved || !spec.tap) return;
+    spec.tap();
+    refreshStudio();
+  });
+  c.visible = stIndex[tab] === studioTab;
+  stScroll.add(c, 64);
+  studioRows.push({ tab: stIndex[tab], c, bg, bar, title, sub, right, spec, key: '', w: 440, h: 64 });
+}
+
+const pct = (x) => `${Math.round(x * 100)}%`;
+const ago = (t) => fmtTime((t - Date.now()) / 1000);
+
+// ----- Desafios -----
+for (const def of CHALLENGES) {
+  addStudioRow('Desafios', {
+    get() {
+      const done = challengesDone.has(def.id);
+      const active = challenge?.id === def.id;
+      const locked = playerLevel() < CHALLENGE_MIN_LEVEL;
+      let sub = `${def.rule} Meta: ${format(def.goal)} bits · prêmio: +${pct(def.reward)} de produção${def.limitS ? ` · ${def.limitS / 60} min` : ''}`;
+      let p = null;
+      if (active) {
+        p = challenge.bits / def.goal;
+        sub = `${def.rule} ${format(challenge.bits)} / ${format(def.goal)} bits${def.limitS ? ` · restam ${fmtTime(def.limitS - (Date.now() - challenge.startedAt) / 1000)}` : ''}`;
+      }
+      return {
+        title: def.name + (done ? '  ✓' : ''), sub, p,
+        right: active ? 'Desistir' : done ? 'Feito' : locked ? `Nv ${CHALLENGE_MIN_LEVEL}` : challenge ? '—' : 'Iniciar',
+        rc: active ? T.bad : done ? T.good : locked || challenge ? T.faint : T.warn,
+        accent: done ? C.good : active ? C.warn : null, dim: !active && (locked || !!challenge) && !done,
+      };
+    },
+    tap() {
+      if (challenge?.id === def.id) {
+        if (confirm('Desistir do desafio? Sua corrida de antes volta, sem o prêmio.')) endChallenge(false, 'você desistiu');
+      } else if (challengesDone.has(def.id)) {
+        toast('Esse desafio já foi vencido', '#9db2c6');
+      } else if (challenge) {
+        toast('Termine ou abandone o desafio atual', '#ff8a8a');
+      } else {
+        startChallenge(def.id);
+      }
+    },
+  });
+}
+
+// ----- Pesquisa -----
+for (const r of RESEARCH) {
+  addStudioRow('Pesquisa', {
+    get() {
+      const done = research.done.has(r.id);
+      const active = research.active?.id === r.id;
+      const busy = !!research.active && !active;
+      const afford = bits >= r.cost;
+      return {
+        title: r.name + (done ? '  ✓' : ''),
+        sub: `${r.desc} · leva ${fmtTime(r.time)}`,
+        p: active ? 1 - (research.active.endsAt - Date.now()) / (r.time * 1000) : null,
+        right: done ? 'Feito' : active ? ago(research.active.endsAt) : format(r.cost),
+        rc: done ? T.good : active ? T.accent : afford && !busy ? T.warn : T.faint,
+        accent: done ? C.good : active ? C.accent : null, dim: busy && !done,
+      };
+    },
+    tap() {
+      if (research.done.has(r.id)) return;
+      if (research.active) toast('Uma pesquisa por vez', '#ff8a8a');
+      else startResearch(r.id);
+    },
+  });
+}
+
+// ----- Jogos (projetos) -----
+for (const p of PROJECTS) {
+  addStudioRow('Jogos', {
+    get() {
+      const st = projects[p.id];
+      const done = st?.state === 'done';
+      const running = st?.state === 'running';
+      return {
+        title: p.name + (done ? '  ✓ lançado' : ''),
+        sub: `${p.desc} Produção +${pct(p.mult)} e visual do cubo · leva ${fmtTime(p.time)}`,
+        p: running ? 1 - (st.endsAt - Date.now()) / (p.time * 1000) : null,
+        right: done ? 'Lançado' : running ? ago(st.endsAt) : format(p.cost),
+        rc: done ? T.good : running ? T.accent : bits >= p.cost ? T.warn : T.faint,
+        accent: done ? C.good : running ? C.accent : null,
+      };
+    },
+    tap() { if (!projects[p.id]) startProject(p.id); },
+  });
+}
+
+// ----- Missões -----
+for (let i = 0; i < 3; i++) {
+  addStudioRow('Missões', {
+    get() {
+      const m = daily.missions[i];
+      if (!m) return { title: '—', sub: '' };
+      const label = MISSION_TYPES[m.type].label(m.type === 'earn' ? format(m.target) : m.target);
+      const prog = missionProgress(m);
+      const ready = prog >= m.target;
+      return {
+        title: label + (m.claimed ? '  ✓' : ''),
+        sub: `${m.type === 'earn' ? format(prog) : Math.floor(prog)} / ${m.type === 'earn' ? format(m.target) : m.target} · prêmio: bits e 2 fragmentos`,
+        p: m.claimed ? null : prog / m.target,
+        right: m.claimed ? 'Feito' : ready ? 'Resgatar' : '',
+        rc: m.claimed ? T.good : T.warn,
+        accent: m.claimed ? C.good : ready ? C.warn : null, dim: false,
+      };
+    },
+    tap() { claimMission(i); },
+  });
+}
+
+// ----- Mercado -----
+addStudioRow('Mercado', {
+  get() {
+    const on = market.endsAt > Date.now();
+    return {
+      title: on ? market.label : proposal ? proposal.title : 'Mercado estável',
+      sub: on ? `Termina em ${ago(market.endsAt)}` : proposal ? 'Decida no cartão que apareceu na tela.' : 'De tempos em tempos acontece algo: booms, crises, investidores e fãs.',
+      right: on ? ago(market.endsAt) : '',
+      rc: market.mult >= 1 ? T.good : T.bad,
+      accent: on ? (market.mult >= 1 ? C.good : C.bad) : null,
+    };
+  },
+});
+addStudioRow('Mercado', {
+  get() {
+    return {
+      title: 'Como funciona',
+      sub: `A cada ${Math.round(MARKET.minGapS / 60)}–${Math.round(MARKET.maxGapS / 60)} min (a partir do nível 6) chega um evento. Algumas propostas pedem uma escolha em ${MARKET.proposalS}s; se você não responder, vale a opção segura.`,
+    };
+  },
+});
+
+// ----- Gerentes -----
+addStudioRow('Gerentes', {
+  get() {
+    return {
+      title: 'Gerentes automáticos',
+      sub: `Compram upgrades sozinhos quando o custo é até ${pct(MANAGER_SPEND)} dos seus bits.`,
+      right: managers.master ? 'Ligado' : 'Desligado',
+      rc: managers.master ? T.good : T.faint,
+      accent: managers.master ? C.good : null,
+    };
+  },
+  tap() { managers.master = !managers.master; sfx.tick(); save(); },
+});
+for (const m of MANAGERS) {
+  addStudioRow('Gerentes', {
+    get() {
+      const hired = managers.hired.has(m.id);
+      const off = managers.off.has(m.id);
+      const locked = playerLevel() < m.level;
+      return {
+        title: m.name,
+        sub: hired ? `Compra ${byId(m.id).name} automaticamente. Toque para ligar/desligar.` : `Contrata-se uma vez. Libera no nível ${m.level}.`,
+        right: hired ? (off ? 'Desligado' : 'Ligado') : locked ? `Nv ${m.level}` : format(m.cost),
+        rc: hired ? (off ? T.faint : T.good) : locked ? T.faint : bits >= m.cost ? T.warn : T.faint,
+        accent: hired && !off ? C.good : null, dim: !hired && locked,
+      };
+    },
+    tap() {
+      if (managers.hired.has(m.id)) {
+        if (managers.off.has(m.id)) managers.off.delete(m.id);
+        else managers.off.add(m.id);
+        sfx.tick();
+        save();
+      } else {
+        hireManager(m.id);
+      }
+    },
+  });
+}
+
+// ----- Visuais -----
+for (const s of SKINS) {
+  addStudioRow('Visuais', {
+    get() {
+      const owned = skinUnlocked(s);
+      const proj = s.project ? PROJECTS.find((p) => p.id === s.project) : null;
+      return {
+        title: s.name,
+        sub: owned ? 'Cor do cubo e do pedestal.' : proj ? `Lance o jogo ${proj.name} para liberar.` : `Custa ${s.cost} fragmentos (vêm dos bits dourados e das missões).`,
+        right: skinId === s.id ? 'Em uso' : owned ? 'Usar' : proj ? 'Bloqueado' : `${s.cost} fr.`,
+        rc: skinId === s.id ? T.good : owned ? T.accent : !proj && fragments >= s.cost ? T.warn : T.faint,
+        accent: s.rim, on: skinId === s.id, dim: !owned && (!!proj || fragments < s.cost),
+      };
+    },
+    tap() {
+      const s0 = s;
+      if (!skinUnlocked(s0) && s0.project) toast('Lance o jogo para liberar esse visual', '#9db2c6');
+      else buyOrEquipSkin(s0.id);
+    },
+  });
+}
+
+// ----- Ascensão -----
+addStudioRow('Ascensão', {
+  get() {
+    return {
+      title: `Núcleos: ${cores} · produção ×${coreMult(cores).toFixed(2)}`,
+      sub: `Você ascendeu ${ascensions} vez(es). Cada núcleo vale mais que um chip, e fica para sempre.`,
+      accent: C.evo,
+    };
+  },
+});
+addStudioRow('Ascensão', {
+  get() {
+    const gain = ascendGain(chips);
+    const ok = chips >= ASCEND_MIN_CHIPS && gain >= 1;
+    return {
+      title: 'Ascender',
+      sub: ok
+        ? `Troca seus ${chips} chips por ${gain} núcleo(s): ×${coreMult(cores).toFixed(2)} → ×${coreMult(cores + gain).toFixed(2)}. Reinicia bits, upgrades e chips.`
+        : `Precisa de ${ASCEND_MIN_CHIPS} chips (você tem ${chips}). Evolua várias vezes para juntar.`,
+      right: ok ? `+${gain} núcleo(s)` : `${chips}/${ASCEND_MIN_CHIPS}`,
+      rc: ok ? T.warn : T.faint, accent: ok ? C.evo : null, dim: !ok,
+    };
+  },
+  tap() { ascend(); },
+});
+
+const STUDIO_INFO = [
+  () => `Regras especiais com prêmio permanente. Libera no nível ${CHALLENGE_MIN_LEVEL}. Sua corrida fica guardada enquanto você joga.`,
+  () => 'Um projeto por vez, em tempo real: continua rodando com o jogo fechado.',
+  () => 'Lance os jogos da Scorpion Bits: bônus de produção e visuais novos para o cubo.',
+  () => `Fragmentos: ${fragments} · as missões mudam todo dia.`,
+  () => `Eventos de mercado${market.endsAt > Date.now() ? ': ' + market.label : ''}.`,
+  () => `Contrate gerentes para automatizar as compras. Gerentes ativos: ${[...managers.hired].filter((id) => !managers.off.has(id)).length}/${MANAGERS.length}.`,
+  () => `Fragmentos: ${fragments} · mudam só a cor, sem efeito na produção.`,
+  () => `Segunda camada de evolução. Chips agora: ${chips}.`,
+];
+
+function refreshStudio() {
+  stInfo.text = STUDIO_INFO[studioTab]();
+  for (const r of studioRows) {
+    if (r.tab !== studioTab) continue;
+    const s = r.spec.get();
+    const key = [s.title, s.sub, s.right, s.rc, s.accent, s.on, s.dim, r.w].join('|');
+    if (key !== r.key) {
+      r.key = key;
+      r.title.text = s.title;
+      r.sub.text = s.sub ?? '';
+      r.right.text = s.right ?? '';
+      r.right.style.fill = s.rc ?? T.accent;
+      const a = s.dim ? 0.5 : 1;
+      r.title.alpha = r.sub.alpha = r.right.alpha = a;
+      drawCard(r.bg, r.w, r.h, { fill: C.card, shadow: false, radius: 12, accent: s.accent ?? null, borderAlpha: s.on ? 0.22 : 0.07 });
+    }
+    r.bar.clear();
+    if (s.p !== null && s.p !== undefined) {
+      const p = Math.min(1, Math.max(0, s.p));
+      r.bar.roundRect(16, r.h - 9, r.w - 32, 3, 1.5).fill({ color: 0xffffff, alpha: 0.08 })
+        .roundRect(16, r.h - 9, Math.max(3, (r.w - 32) * p), 3, 1.5).fill(C.accent);
+    }
+  }
+  stPills.forEach((b, i) => b.setActive(i === studioTab));
+}
+
+function setStudioTab(i) {
+  if (i === studioTab) return;
+  studioTab = i;
+  sfx.tick();
+  for (const r of studioRows) r.c.visible = r.tab === i;
+  stScroll.scrollY = 0;
+  layoutStudio();
+  refreshStudio();
+  stScroll.playIn(1);
+}
+
+function layoutStudio() {
+  const { width, height } = app.screen;
+  const narrow = width < 760;
+  const w = Math.min(520, width - (narrow ? 12 : 24));
+  const rowW = w - 48;
+  stW = w;
+  const rowH = narrow ? 80 : 64;
+  const perRow = 4;
+  const gap = 6;
+  const pillW = Math.floor((rowW - gap * (perRow - 1)) / perRow);
+  const pillsTop = 58;
+  stPills.forEach((b, i) => {
+    fitButton(b, pillW, 28);
+    b.labelObj.style.fontSize = narrow ? 11 : 12;
+    b.position.set(24 + (i % perRow) * (pillW + gap), pillsTop + Math.floor(i / perRow) * 34);
+  });
+  const infoTop = pillsTop + 74;
+  stInfo.style.wordWrapWidth = rowW;
+  stInfo.position.set(24, infoTop);
+  stInfo.text = STUDIO_INFO[studioTab]();
+  const scrollTop = infoTop + Math.max(18, stInfo.height) + 8;
+
+  for (const r of studioRows) {
+    r.w = rowW;
+    r.h = rowH;
+    r.key = '';
+    r.sub.style.wordWrapWidth = rowW - 32 - (narrow ? 70 : 96);
+    r.right.position.set(rowW - 14, 10);
+    r.c.hitArea = new Rectangle(0, 0, rowW, rowH);
+  }
+  for (const it of stScroll.items) it.h = rowH;
+  stScroll.width = rowW;
+  stScroll.relayout();
+  const maxView = height - (narrow ? 12 : 24) - scrollTop - 16;
+  const viewH = Math.max(100, Math.min(stScroll.contentH, 470, maxView));
+  const h = scrollTop + viewH + 16;
+  drawCard(stBg, w, h, { fill: C.panel, fillAlpha: 0.98, radius: 24 });
+  stTitle.position.set(24, narrow ? 18 : 20);
+  stTitle.style.fontSize = narrow ? 16 : 19;
+  stClose.position.set(w - 84 - 20, 16);
+  stScroll.root.position.set(24, scrollTop);
+  stScroll.resize(viewH, rowW);
+  stScroll.studioTop = scrollTop;
+  stH = h;
+  studioPanel.position.set((width - w) / 2, Math.max(6, (height - h) / 2));
+  refreshStudio();
+}
+let stH = 400;
+
+function toggleStudio(open = !studioPanel.visible) {
+  if (open) {
+    for (const p of [tree, achPanel, settingsPanel]) {
+      if (p.visible) { cancelTweens(p); p.visible = false; }
+    }
+    cancelTweens(studioPanel);
+    layoutStudio();
+    showModal(studioPanel);
+    stScroll.playIn(1);
+  } else if (studioPanel.visible) {
+    hideModal(studioPanel);
+  }
+}
+
+// botão do Estúdio (ao lado da engrenagem) com um ponto de aviso
+const studioBtn = makeButton(36, 36, { tint: C.accent, radius: 18, alpha: 0.06 });
+const studioIcon = new Graphics();
+studioIcon.poly([0, -10, 9, -5, 0, 0, -9, -5]).fill(0xeef5fb);
+studioIcon.poly([-9, -5, 0, 0, 0, 10, -9, 5]).fill({ color: 0xeef5fb, alpha: 0.55 });
+studioIcon.poly([9, -5, 0, 0, 0, 10, 9, 5]).fill({ color: 0xeef5fb, alpha: 0.3 });
+studioIcon.position.set(18, 18);
+studioBtn.addChild(studioIcon);
+studioBtn.on('pointertap', () => toggleStudio());
+const studioDot = new Graphics().circle(0, 0, 4.5).fill(C.warn);
+studioDot.position.set(30, 6);
+studioDot.visible = false;
+studioBtn.addChild(studioDot);
+app.stage.addChild(studioBtn);
+
+function updateStudioDot() {
+  studioDot.visible = !!proposal || daily.missions.some((m) => !m.claimed && missionProgress(m) >= m.target);
+}
+
+// ---------- Proposta de mercado (cartão flutuante) ----------
+const propCard = new Container();
+propCard.visible = false;
+const propBg = new Graphics();
+const propTitle = txt('', T.text, 15, true);
+const propText = txt('', T.dim, 12);
+propText.style.wordWrap = true;
+const propBarG = new Graphics();
+const propA = labeledButton(150, 32, '', C.good, T.good, 13, 0.1);
+const propB = labeledButton(150, 32, '', C.warn, T.warn, 13, 0.1);
+propCard.addChild(propBg, propTitle, propText, propBarG, propA, propB);
+propA.on('pointertap', () => { if (!uiMoved) resolveProposal('a'); });
+propB.on('pointertap', () => { if (!uiMoved) resolveProposal('b'); });
+app.stage.addChild(propCard);
+let shownProposal = null;
+let propW = 340;
+let propH = 150;
+
+function layoutProposal() {
+  const { width, height } = app.screen;
+  propW = Math.min(360, width - 20);
+  propText.style.wordWrapWidth = propW - 32;
+  propTitle.position.set(16, 12);
+  propText.position.set(16, 36);
+  const textBottom = 36 + propText.height;
+  const bw = Math.floor((propW - 32 - 10) / 2);
+  fitButton(propA, bw, 32);
+  fitButton(propB, bw, 32);
+  propA.position.set(16, textBottom + 12);
+  propB.position.set(16 + bw + 10, textBottom + 12);
+  propH = textBottom + 12 + 32 + 20;
+  drawCard(propBg, propW, propH, { fill: C.panel, fillAlpha: 0.97, radius: 18, borderAlpha: 0.14 });
+  propCard.x = (width - propW) / 2;
+  propCard.y = Math.max(hudBottom + 8, ctrlTop - propH - 34);
+}
+
+function updateProposal() {
+  if (proposal !== shownProposal) {
+    shownProposal = proposal;
+    if (proposal) {
+      propTitle.text = proposal.title;
+      propText.text = proposal.text;
+      propA.labelObj.text = proposal.a.label;
+      propB.labelObj.text = proposal.b.label;
+      layoutProposal();
+      propCard.visible = true;
+      propCard.alpha = 0;
+      const y = propCard.y;
+      propCard.y = y + 16;
+      tween(propCard, { alpha: 1, y }, 320);
+    } else {
+      propCard.visible = false;
+    }
+  }
+  if (proposal) {
+    const left = Math.max(0, (proposal.expiresAt - Date.now()) / (MARKET.proposalS * 1000));
+    propBarG.clear().roundRect(16, propH - 12, propW - 32, 3, 1.5).fill({ color: 0xffffff, alpha: 0.08 })
+      .roundRect(16, propH - 12, Math.max(2, (propW - 32) * left), 3, 1.5).fill(C.warn);
+  }
+}
+
+// ---------- HUD extra: combo e linha de status ----------
+const statusText = txt('', T.warn, 12, true);
+statusText.anchor.set(0.5, 0);
+const comboText = txt('', T.accent, 13, true);
+comboText.anchor.set(0.5, 0);
+const comboBar = new Graphics();
+app.stage.addChild(statusText, comboText, comboBar);
+for (const el of [statusText, comboText, comboBar]) el.eventMode = 'none';
+let comboShown = -1;
+
+function updateHud() {
+  const rem = (t) => ago(t);
+  let line = '';
+  let color = T.warn;
+  if (challenge) {
+    const def = challengeRule();
+    line = `Desafio · ${def.name} · ${format(challenge.bits)} / ${format(def.goal)}`;
+    if (def.limitS) line += ` · ${fmtTime(def.limitS - (Date.now() - challenge.startedAt) / 1000)}`;
+  } else if (market.endsAt > Date.now()) {
+    line = `${market.label} · ${rem(market.endsAt)}`;
+    color = market.mult >= 1 ? T.good : T.bad;
+  }
+  statusText.text = line;
+  statusText.style.fill = color;
+
+  const m = Math.round(combo.meter);
+  if (m !== comboShown) {
+    comboShown = m;
+    comboText.text = m >= 1 ? `Combo ×${comboMult().toFixed(2)}` : '';
+    comboBar.clear();
+    if (m >= 1) {
+      const w = 140;
+      const x = app.screen.width / 2 - w / 2;
+      const y = ctrlTop - 6;
+      comboBar.roundRect(x, y, w, 4, 2).fill({ color: 0xffffff, alpha: 0.08 })
+        .roundRect(x, y, Math.max(4, w * (m / 100)), 4, 2).fill(m >= 100 ? C.warn : C.accent);
+    }
+  }
+}
+
+// ---------- Visuais: cor do cubo (filtro de matiz) e do pedestal ----------
+const skinFilter = new ColorMatrixFilter();
+
+function paintSkinFilter(cycleDeg = 0) {
+  const s = skinDef();
+  skinFilter.reset();
+  skinFilter.hue(s.cycle ? cycleDeg : s.hue, false);
+  if (s.saturate) skinFilter.saturate(s.saturate, true);
+  if (s.gray) skinFilter.greyscale(0.5, true);
+}
+
+function applySkin() {
+  const s = skinDef();
+  if (!s.hue && !s.saturate && !s.gray && !s.cycle) {
+    cube.filters = null;
+  } else {
+    paintSkinFilter(0);
+    cube.filters = [skinFilter];
+  }
+  drawPedestal();
+  drawHalo();
+}
+
+
+app.stage.addChild(dim, achPanel, tree, settingsPanel, studioPanel);
 
 // ---------- Avisos (toasts): pílulas suaves que descem e somem ----------
 const toastLayer = new Container();
@@ -1808,6 +2810,11 @@ const canvasPoint = (e) => {
 // qual área rolável está sob o ponto (gaveta ativa ou painel de conquistas)
 function scrollTargetAt(px, py) {
   if (tree.visible || settingsPanel.visible) return null;
+  if (studioPanel.visible) {
+    const top = studioPanel.y + (stScroll.studioTop ?? 150);
+    const inside = px >= studioPanel.x && px <= studioPanel.x + stW && py >= top && py <= top + stScroll.viewH;
+    return inside ? stScroll : null;
+  }
   if (achPanel.visible) {
     const inside = px >= achPanel.x && px <= achPanel.x + achW && py >= achPanel.y && py <= achPanel.y + achScroll.viewH + 84;
     return inside ? achScroll : null;
@@ -1897,22 +2904,25 @@ function layout() {
     bpsText.style.fontSize = 17; bpsText.position.set(cx, 52);
     metaText.style.fontSize = 12; metaText.position.set(cx, 76);
     frenzyText.style.fontSize = 14; frenzyText.position.set(cx, 108);
+    statusText.position.set(cx, 126);
     xpLayout = { y: 94, w: Math.min(220, width - 40) };
-    hudBottom = 128;
+    hudBottom = 146;
   } else if (landscape) {
     counter.style.fontSize = 28; counter.position.set(cx, 4);
     bpsText.style.fontSize = 15; bpsText.position.set(cx, 38);
     metaText.style.fontSize = 12; metaText.position.set(cx, 58);
     frenzyText.style.fontSize = 13; frenzyText.position.set(cx, 86);
+    statusText.position.set(cx, 102);
     xpLayout = { y: 76, w: 200 };
-    hudBottom = 104;
+    hudBottom = 120;
   } else {
     counter.style.fontSize = 46; counter.position.set(cx, 14);
     bpsText.style.fontSize = 20; bpsText.position.set(cx, 72);
     metaText.style.fontSize = 14; metaText.position.set(cx, 100);
     frenzyText.style.fontSize = 18; frenzyText.position.set(cx, 140);
+    statusText.position.set(cx, 164);
     xpLayout = { y: 126, w: 240 };
-    hudBottom = 160;
+    hudBottom = 180;
   }
 
   // ----- Controles de baixo -----
@@ -1972,6 +2982,11 @@ function layout() {
   rightDock.layout(width, height, top, dockBottom);
 
   gearBtn.position.set(width - 36 - (portrait ? 10 : 16), portrait || landscape ? 8 : 14);
+  studioBtn.position.set(gearBtn.x - 44, gearBtn.y);
+  comboText.position.set(cx, ctrlTop - 24);
+  comboShown = -1;
+  if (proposal) layoutProposal();
+  if (studioPanel.visible) layoutStudio();
 
   drawBackground();
   drawPedestal();
@@ -2034,11 +3049,11 @@ const PARTICLE_LIFE = 650;
 // ---------- Bit dourado ----------
 let golden = null;
 const nextGoldenDelay = () =>
-  (GOLDEN_MIN_MS + Math.random() * (GOLDEN_MAX_MS - GOLDEN_MIN_MS)) * mods.goldenFreq;
+  (GOLDEN_MIN_MS + Math.random() * (GOLDEN_MAX_MS - GOLDEN_MIN_MS)) * mods.goldenFreq * fx.golden;
 let goldenTimer = nextGoldenDelay();
 
 function spawnGolden() {
-  if (golden) return;
+  if (golden || ruleId() === 'nogold') return;
   const sprite = new Sprite(texture);
   sprite.anchor.set(0.5);
   sprite.tint = C.warn;
@@ -2072,14 +3087,16 @@ function removeGolden() {
 function collectGolden() {
   if (!golden) return;
   goldenClicks++;
+  fragments++;
+  trackDaily('golden');
   sfx.goldenCollect();
   haptic(15);
   if (Math.random() < 0.5) {
     sfx.boost();
-    frenzyLeft = FRENZY_MS * mods.frenzyDur;
+    frenzyLeft = FRENZY_MS * mods.frenzyDur * fx.frenzyDur;
     toast(`Frenesi! Produção x${frenzyMult()} por ${Math.round(frenzyLeft / 1000)}s`, '#ffc46b');
   } else {
-    const gain = (Math.min(bits * 0.15, getBps() * 900) + 13) * mods.luckyMult;
+    const gain = (Math.min(bits * 0.15, getBps() * 900) + 13) * mods.luckyMult * fx.lucky;
     earn(gain);
     toast(`Sorte! +${format(gain)} bits`, '#ffc46b');
   }
@@ -2095,6 +3112,8 @@ cube.on('pointerdown', (event) => {
   const gain = getBitsPerClick();
   earn(gain);
   clicks++;
+  trackDaily('clicks');
+  comboClick();
 
   sfx.click();
   haptic(6);
@@ -2121,6 +3140,7 @@ updateAbilities();
 refreshAchievements();
 refreshTree();
 layout();
+applySkin();
 app.renderer.on('resize', layout);
 for (const dock of [leftDock, rightDock]) dock.activePage()?.playIn(dock.side === 'right' ? 1 : -1);
 
@@ -2161,7 +3181,7 @@ if (migrationNote) toast(migrationNote, '#ffc46b');
 
 // ---------- Progresso offline ----------
 if (lastSave) {
-  const capS = (BASE_OFFLINE_H + mods.offlineH) * 3600;
+  const capS = (BASE_OFFLINE_H + mods.offlineH + fx.offlineH) * 3600;
   const elapsed = Math.min((Date.now() - lastSave) / 1000, capS);
   const gain = getBps() * elapsed * OFFLINE_RATE;
   if (gain >= 1) {
@@ -2172,6 +3192,8 @@ if (lastSave) {
 
 // ---------- Game loop ----------
 let slowTimer = 0;
+let studioTimer = 0;
+let hudTimer = 0;
 let achTimer = 0;
 let perksEmptyShown = false;
 
@@ -2181,6 +3203,28 @@ app.ticker.add((ticker) => {
 
   updateTweens(dt);
   earn(getBps() * (dt / 1000));
+
+  // mecânicas do Estúdio
+  studioTimer += dt;
+  if (studioTimer >= 1000) {
+    studioTimer = 0;
+    ensureDaily();
+    tickChallenge();
+    tickResearch();
+    tickProjects();
+    tickManagers();
+  }
+  tickMarket();
+  tickCombo(dt);
+  updateProposal();
+  updateHud();
+  if (skinDef().cycle) paintSkinFilter((performance.now() / 30) % 360);
+  hudTimer += dt;
+  if (hudTimer >= 250) {
+    hudTimer = 0;
+    updateStudioDot();
+    if (studioPanel.visible) refreshStudio();
+  }
 
   leftDock.update(dt);
   rightDock.update(dt);
@@ -2324,6 +3368,24 @@ document.addEventListener('visibilitychange', () => {
 if (import.meta.env.DEV) {
   window.__idle = {
     sfx, settings, musicState, toggleSettings, earn, spawnGolden, collectGolden, prestige, checkAchievements, pendingChips, setBuyMode,
+    toggleStudio, setStudioTab, startChallenge, endChallenge, startResearch, startProject, hireManager, claimMission,
+    openProposal, resolveProposal, ascend, buyOrEquipSkin, comboClick, tickMarket, tickResearch, tickProjects,
+    studioRows, stPills, studioBtn,
+    get ext() {
+      return {
+        fragments, cores, ascensions, challenge, challengesDone: [...challengesDone], research: { done: [...research.done], active: research.active },
+        projects, managers: { hired: [...managers.hired] }, skinId, daily, fx, market, proposal: !!proposal, combo: { ...combo },
+        setBits: (v) => { bits = v; totalBits = Math.max(totalBits, v); runBits = Math.max(runBits, v); },
+        setChips: (v) => { chips = v; },
+        setCores: (v) => { cores = v; recomputeFx(); },
+        addFragments: (v) => { fragments += v; },
+        setTotal: (v) => { totalBits = v; },
+        expireResearch: () => { if (research.active) research.active.endsAt = 0; },
+        expireProject: (id) => { if (projects[id]) projects[id].endsAt = 0; },
+        forceMarket: () => { market.nextAt = 0; },
+        addCounter: (t, n) => { daily.counters[t] = (daily.counters[t] ?? 0) + n; },
+      };
+    },
     buySkill, toggleTree, toggleAchievements, useAbility, SKILLS, leftDock, rightDock,
     hitObj: (x, y) => app.renderer.events.rootBoundary.hitTest(x, y),
     hit: (x, y) => {
@@ -2346,7 +3408,7 @@ if (import.meta.env.DEV) {
         bps: getBps(), perClick: getBitsPerClick(), golden: !!golden,
         docks: { l: leftDock.state(), r: rightDock.state() },
         layoutMode,
-        modal: tree.visible ? 'tree' : achPanel.visible ? 'ach' : settingsPanel.visible ? 'settings' : null,
+        modal: tree.visible ? 'tree' : achPanel.visible ? 'ach' : settingsPanel.visible ? 'settings' : studioPanel.visible ? 'studio' : null,
       };
     },
   };

@@ -59,12 +59,32 @@ Ele roda um bot por 24 h de jogo e compara presets (o que existia antes x o atua
 cada evolução dá no máximo **5 pontos de habilidade**; os chips são a raiz cúbica dos bits da vida
 (`CHIP_DIVISOR`) e o bônus deles tem retorno decrescente; o jogo fechado rende **50%**.
 
+## Estúdio: mecânicas extras
+
+O botão do cubo ao lado da engrenagem abre a janela **Estúdio**, com oito abas. Dados e regras puras
+ficam em `src/features.js` (balancear = editar números lá); a lógica e a interface ficam no `main.js`.
+
+| Aba | O que é |
+| --- | --- |
+| Desafios | Recomeça do zero com uma regra (sem cliques, sem melhorias, 3 upgrades, custo x2, sem sorte, 15 min). A corrida anterior fica guardada; vencer dá produção permanente |
+| Pesquisa | 12 projetos, um por vez, em tempo real (rodam com o jogo fechado), com bônus permanentes |
+| Jogos | Lança Tirania, AstroDash, Tower Defence, Sitis e Projeto noir: bits + horas reais; dão produção e um visual do cubo |
+| Missões | 3 por dia (mesmas para todos), pagam bits e fragmentos |
+| Mercado | Booms, crises, investidor e fã: algumas propostas pedem uma escolha em 40 s |
+| Gerentes | Compram upgrades de produção sozinhos |
+| Visuais | Cor do cubo e do pedestal, comprados com fragmentos (bits dourados) ou liberados por jogos |
+| Ascensão | Segunda evolução: 50+ chips viram núcleos (produção permanente maior) |
+
+Também há **combo de cliques** (barra embaixo do cubo). Todos os campos novos do save são opcionais,
+então saves antigos continuam funcionando.
+
 ## Estrutura
 
 | Arquivo | O que faz |
 | --- | --- |
 | `src/main.js` | Estado do jogo, lógica e toda a interface |
 | `src/data.js` | Upgrades e melhorias |
+| `src/features.js` | Dados e regras do Estúdio: desafios, pesquisa, jogos, gerentes, missões, mercado, visuais, ascensão |
 | `src/skills.js` | As 100 habilidades (mandala) |
 | `src/ui.js`, `src/theme.js`, `src/anim.js` | Componentes, tema e animações |
 | `src/sfx.js`, `src/music.js`, `src/settings.js` | Sons sintetizados, música em loop e configurações |
