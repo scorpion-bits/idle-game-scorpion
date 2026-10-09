@@ -30,7 +30,12 @@ document.body.appendChild(app.canvas);
 
 // ---------- Constantes ----------
 const SAVE_KEY = 'scorpion-bits-idle-v1';
+// ---- Balanceamento (ver scripts/balance-sim.mjs: simula o ritmo do jogo para testar mudanças) ----
 const BASE_OFFLINE_H = 8;            // horas de ganho offline (habilidades aumentam)
+const OFFLINE_RATE = 0.5;            // fração da produção que rende com o jogo fechado
+const MAX_SP_PER_PRESTIGE = 5;       // pontos de habilidade que uma evolução pode dar, no máximo
+const CHIP_CURVE = 0.85;             // retorno decrescente: o bônus dos chips cresce com chips^0.85
+const LEVEL_XP_BASE = 1.8;           // cada nível do jogador exige 1,8x mais bits que o anterior
 const GROWTH = 1.15;                 // custo cresce 15% por unidade
 const LEVEL_SIZE = 10;               // a barra do upgrade enche a cada 10 unidades...
 const LEVEL_BASE_BONUS = 0.2;        // ...e ao encher ele sobe de nível: +20% de produção
@@ -41,7 +46,7 @@ const FRENZY_MULT = 7;
 const GOLDEN_MIN_MS = 60000;
 const GOLDEN_MAX_MS = 120000;
 const GOLDEN_LIFE_MS = 12000;
-const CHIP_DIVISOR = 1e5;            // runBits necessários para o 1º chip
+const CHIP_DIVISOR = 1e5;            // runBits necessários para o 1º chip (chips = raiz cúbica)
 const BUY_MODES = [1, 10, 100, 'max'];
 const ISO = 1;                       // achatamento vertical da mandala (1 = círculo; 0.58 = chão isométrico)
 
@@ -53,6 +58,8 @@ let clicks = 0;
 let goldenClicks = 0;
 let chips = 0;
 let prestiges = 0;
+let prestigeSP = 0;   // pontos de habilidade vindos de evoluções (no máx. MAX_SP_PER_PRESTIGE cada)
+let migrationNote = null;
 let abilityUses = 0;
 let playMs = 0;
 let frenzyLeft = 0;
@@ -100,7 +107,7 @@ function improvementsMult(u) {
 const unitMult = (u) => improvementsMult(u) * levelMult(u) * (mods.gen[u.id] ?? 1);
 
 function globalMult() {
-  return (1 + (CHIP_BONUS + mods.chipBonus) * chips) * (1 + ACHIEVEMENT_BONUS * unlocked.size);
+  return (1 + chipBoost()) * (1 + ACHIEVEMENT_BONUS * unlocked.size);
 }
 
 function baseBps() {
@@ -125,7 +132,10 @@ function getBitsPerClick() {
 }
 
 const totalOwned = () => upgrades.reduce((sum, u) => sum + u.owned, 0);
-const pendingChips = () => Math.floor(Math.sqrt(runBits / CHIP_DIVISOR));
+// bônus de produção dos chips (com retorno decrescente, para a evolução não virar uma bola de neve)
+const chipBoostFor = (n) => (CHIP_BONUS + mods.chipBonus) * n ** CHIP_CURVE;
+const chipBoost = () => chipBoostFor(chips);
+const pendingChips = () => Math.floor(Math.cbrt(runBits / CHIP_DIVISOR));
 
 function earn(amount) {
   bits += amount;
@@ -206,18 +216,18 @@ function buyImprovement(imp) {
 
 // ---------- Nível do jogador e pontos de habilidade ----------
 function playerLevel() {
-  return totalBits < 1000 ? 0 : Math.floor(Math.log(totalBits / 1000) / Math.log(1.6)) + 1;
+  return totalBits < 1000 ? 0 : Math.floor(Math.log(totalBits / 1000) / Math.log(LEVEL_XP_BASE)) + 1;
 }
 
 function levelProgress() {
   if (totalBits < 1000) return totalBits / 1000;
   const lv = playerLevel();
-  const from = 1000 * 1.6 ** (lv - 1);
-  const to = 1000 * 1.6 ** lv;
+  const from = 1000 * LEVEL_XP_BASE ** (lv - 1);
+  const to = 1000 * LEVEL_XP_BASE ** lv;
   return (totalBits - from) / (to - from);
 }
 
-const skillPointsTotal = () => playerLevel() + chips;
+const skillPointsTotal = () => playerLevel() + prestigeSP;
 const skillPointsSpent = () => SKILLS.reduce((sum, s) => sum + (skillsOwned.has(s.id) ? s.cost : 0), 0);
 const skillPointsFree = () => skillPointsTotal() - skillPointsSpent();
 
@@ -269,7 +279,7 @@ const num = (v) => (Number.isFinite(v) ? v : 0);
 function save() {
   try {
     localStorage.setItem(SAVE_KEY, JSON.stringify({
-      bits, totalBits, runBits, clicks, goldenClicks, chips, prestiges, abilityUses, playMs, buyMode,
+      bits, totalBits, runBits, clicks, goldenClicks, chips, prestiges, prestigeSP, abilityUses, playMs, buyMode,
       owned: Object.fromEntries(upgrades.map((u) => [u.id, u.owned])),
       bought: [...bought],
       unlocked: [...unlocked],
@@ -295,6 +305,10 @@ function load() {
     goldenClicks = num(d.goldenClicks);
     chips = num(d.chips);
     prestiges = num(d.prestiges);
+    // saves antigos davam 1 ponto por chip; agora cada evolução dá no máximo MAX_SP_PER_PRESTIGE
+    prestigeSP = d.prestigeSP === undefined
+      ? Math.min(chips, MAX_SP_PER_PRESTIGE * prestiges)
+      : num(d.prestigeSP);
     abilityUses = num(d.abilityUses);
     playMs = num(d.playMs);
     if (BUY_MODES.includes(d.buyMode)) buyMode = d.buyMode;
@@ -303,6 +317,12 @@ function load() {
     for (const id of d.unlocked ?? []) unlocked.add(id);
     for (const id of d.skills ?? []) if (SKILLS.some((s) => s.id === id)) skillsOwned.add(id);
     recomputeMods();
+    // se o jogador tinha gasto mais pontos do que agora tem direito, devolve todos (ele refaz a árvore)
+    if (skillPointsSpent() > skillPointsTotal()) {
+      skillsOwned.clear();
+      recomputeMods();
+      migrationNote = 'Rebalanceamos os pontos de habilidade: suas habilidades foram devolvidas para você redistribuir.';
+    }
     savedUi = d.ui ?? null;
 
     const last = d.lastSave ?? null;
@@ -756,8 +776,12 @@ function prestige() {
     toast('Ainda não dá para evoluir: ganhe mais bits', '#ff8a8a');
     return;
   }
+  const spGain = Math.min(MAX_SP_PER_PRESTIGE, gain);
+  const boostNow = Math.round(chipBoostFor(chips) * 100);
+  const boostAfter = Math.round(chipBoostFor(chips + gain) * 100);
   const ok = confirm(
-    `Evoluir agora?\n\nVocê ganha ${gain} chip(s): +${Math.round(gain * (CHIP_BONUS + mods.chipBonus) * 100)}% de produção e ${gain} ponto(s) de habilidade, permanentes.\n` +
+    `Evoluir agora?\n\nVocê ganha ${gain} chip(s): o bônus de produção vai de +${boostNow}% para +${boostAfter}%, permanente.\n` +
+    `Também ganha ${spGain} ponto(s) de habilidade (máximo de ${MAX_SP_PER_PRESTIGE} por evolução).\n` +
     'Seus bits, upgrades e melhorias serão reiniciados. Chips, conquistas e habilidades ficam.',
   );
   if (!ok) return;
@@ -765,6 +789,7 @@ function prestige() {
   sfx.prestige();
   haptic(30);
   chips += gain;
+  prestigeSP += spGain;
   prestiges++;
   bits = 0;
   runBits = 0;
@@ -773,7 +798,7 @@ function prestige() {
   updateShop();
   updatePerks();
   addRipple(2);
-  toast(`Evolução! +${gain} chip(s)`, '#a57bf8');
+  toast(`Evolução! +${gain} chip(s) e +${spGain} ponto(s) de habilidade`, '#a57bf8');
   checkAchievements();
   save();
 }
@@ -2131,11 +2156,14 @@ if (boot) {
   setTimeout(() => boot.remove(), 800);
 }
 
+// ---------- Aviso de rebalanceamento (saves antigos) ----------
+if (migrationNote) toast(migrationNote, '#ffc46b');
+
 // ---------- Progresso offline ----------
 if (lastSave) {
   const capS = (BASE_OFFLINE_H + mods.offlineH) * 3600;
   const elapsed = Math.min((Date.now() - lastSave) / 1000, capS);
-  const gain = getBps() * elapsed;
+  const gain = getBps() * elapsed * OFFLINE_RATE;
   if (gain >= 1) {
     earn(gain);
     toast(`Bem-vindo de volta! +${format(gain)} bits`, '#ffc46b');
@@ -2198,7 +2226,7 @@ app.ticker.add((ticker) => {
   if (Math.abs(bits - shownBits) < 0.5) shownBits = bits;
   counter.text = `${format(shownBits)} bits`;
   bpsText.text = `${rate(getBps())} bits/s`;
-  const chipPct = Math.round(chips * (CHIP_BONUS + mods.chipBonus) * 100);
+  const chipPct = Math.round(chipBoost() * 100);
   metaText.text = `Nível ${playerLevel()} · Pontos ${skillPointsFree()} · Chips ${chips} (+${chipPct}%)`;
 
   // Interface que não precisa atualizar a cada frame
@@ -2312,7 +2340,7 @@ if (import.meta.env.DEV) {
     get state() {
       return {
         bits, runBits, totalBits, clicks, chips, prestiges, frenzyLeft, buyMode,
-        level: playerLevel(), sp: skillPointsFree(),
+        level: playerLevel(), sp: skillPointsFree(), spTotal: skillPointsTotal(), prestigeSP,
         unlocked: [...unlocked], bought: [...bought], skills: [...skillsOwned],
         owned: Object.fromEntries(upgrades.map((u) => [u.id, u.owned])),
         bps: getBps(), perClick: getBitsPerClick(), golden: !!golden,

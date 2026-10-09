@@ -46,6 +46,19 @@ git status           # revise: só a pasta jogo/ deve mudar
 git add jogo && git commit -m "Atualiza o Idle Bits" && git push
 ```
 
+## Balanceamento
+
+As constantes de ritmo ficam no topo de `src/main.js` (`MAX_SP_PER_PRESTIGE`, `CHIP_CURVE`,
+`LEVEL_XP_BASE`, `CHIP_DIVISOR`, `OFFLINE_RATE`). Para testar uma mudança sem jogar horas, use o simulador:
+
+```bash
+node scripts/balance-sim.mjs
+```
+
+Ele roda um bot por 24 h de jogo e compara presets (o que existia antes x o atual). Regras atuais:
+cada evolução dá no máximo **5 pontos de habilidade**; os chips são a raiz cúbica dos bits da vida
+(`CHIP_DIVISOR`) e o bônus deles tem retorno decrescente; o jogo fechado rende **50%**.
+
 ## Estrutura
 
 | Arquivo | O que faz |
