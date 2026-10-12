@@ -5,5 +5,5 @@
 const P = window.PIXI;
 if (!P) throw new Error('PixiJS não carregou (assets/vendor/pixi.min.js).');
 
-export const { Application, Assets, Sprite, Container, Graphics, Rectangle, Text } = P;
+export const { Application, Assets, Sprite, Container, Graphics, Rectangle, Text, ColorMatrixFilter } = P;
 export default P;
